@@ -28,12 +28,14 @@ class _ChatScreenState extends State<ChatScreen> {
   int _lastMessageCount = 0;
   bool _myProfileEnsured = false;
 
+  static const double _avatarSize = 36;
+  static const double _avatarGap = 10;
+
   @override
   void initState() {
     super.initState();
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
-
     _ensureMyPublicProfile();
   }
 
@@ -65,7 +67,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // si no está completo, no tocamos nada
       if (username.isEmpty || displayName.isEmpty) return;
 
-      // ✅ Creamos/actualizamos perfil público SIN photoURL (y borramos si existía)
+      // Perfil público sin foto (estilo ProjectZ placeholder)
       await FirebaseFirestore.instance.collection('profiles').doc(uid).set(
         {
           'username': username,
@@ -76,7 +78,6 @@ class _ChatScreenState extends State<ChatScreen> {
         SetOptions(merge: true),
       );
 
-      // Cache para que no salga "Usuario"
       _profileCache[uid] = PublicProfile(
         uid: uid,
         username: username,
@@ -84,7 +85,7 @@ class _ChatScreenState extends State<ChatScreen> {
         photoURL: null,
       );
     } catch (_) {
-      // si falla, caerá al fallback "Usuario"
+      // si falla, se verá "Usuario" como fallback
     }
   }
 
@@ -116,7 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String _formatTime(DateTime dt) {
-    final local = dt.toLocal(); // ✅ evita desfases típicos
+    final local = dt.toLocal();
     final h = local.hour.toString().padLeft(2, '0');
     final m = local.minute.toString().padLeft(2, '0');
     return '$h:$m';
@@ -169,10 +170,28 @@ class _ChatScreenState extends State<ChatScreen> {
     await batch.commit();
   }
 
+  Widget _avatarPlaceholder({bool visible = true}) {
+    // visible=false reserva hueco pero no dibuja nada (para mensajes seguidos)
+    if (!visible) {
+      return SizedBox(
+        width: _avatarSize,
+        height: _avatarSize,
+      );
+    }
+
+    return CircleAvatar(
+      radius: _avatarSize / 2,
+      backgroundColor: Colors.white.withOpacity(0.08),
+      child: Icon(
+        Icons.person,
+        size: 18,
+        color: Colors.white.withOpacity(0.85),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final myUid = FirebaseAuth.instance.currentUser?.uid;
-
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.room.name),
@@ -207,35 +226,45 @@ class _ChatScreenState extends State<ChatScreen> {
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msg = messages[index];
-                    final isMine = myUid != null && msg.authorId == myUid;
 
-                    return FutureBuilder<PublicProfile?>(
-                      future: _loadProfile(msg.authorId),
-                      builder: (context, profSnap) {
-                        final profile = profSnap.data;
+                    final prevAuthorId =
+                        index > 0 ? messages[index - 1].authorId : null;
 
-                        final displayName =
-                            (profile?.displayName.isNotEmpty == true)
-                                ? profile!.displayName
-                                : 'Usuario';
+                    final isFirstInGroup = prevAuthorId != msg.authorId;
 
-                        final username =
-                            (profile?.username.isNotEmpty == true)
-                                ? '@${profile!.username}'
-                                : '';
+                    // Separación: más grande cuando cambia el autor
+                    final topPadding = isFirstInGroup ? 14.0 : 6.0;
 
-                        final timeText = msg.createdAt.millisecondsSinceEpoch == 0
-                            ? ''
-                            : _formatTime(msg.createdAt);
+                    return Padding(
+                      padding: EdgeInsets.only(top: topPadding),
+                      child: FutureBuilder<PublicProfile?>(
+                        future: _loadProfile(msg.authorId),
+                        builder: (context, profSnap) {
+                          final profile = profSnap.data;
 
-                        return _MessageTile(
-                          isMine: isMine,
-                          displayName: displayName,
-                          username: username,
-                          content: msg.content,
-                          timeText: timeText,
-                        );
-                      },
+                          final displayName =
+                              (profile?.displayName.isNotEmpty == true)
+                                  ? profile!.displayName
+                                  : 'Usuario';
+
+                          // En ProjectZ la hora suele ser discreta; aquí la mantenemos
+                          // pero solo en la cabecera del grupo (si quieres quitarla, lo borro).
+                          final timeText = (msg.createdAt.millisecondsSinceEpoch == 0)
+                              ? ''
+                              : _formatTime(msg.createdAt);
+
+                          return _ProjectZMessageRow(
+                            avatar: _avatarPlaceholder(visible: isFirstInGroup),
+                            reserveAvatarSpace: !isFirstInGroup,
+                            avatarSize: _avatarSize,
+                            avatarGap: _avatarGap,
+                            showHeader: isFirstInGroup,
+                            displayName: displayName,
+                            timeText: isFirstInGroup ? timeText : '',
+                            content: msg.content,
+                          );
+                        },
+                      ),
                     );
                   },
                 );
@@ -268,100 +297,74 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-class _MessageTile extends StatelessWidget {
-  final bool isMine;
-  final String displayName;
-  final String username;
-  final String content;
-  final String timeText;
+class _ProjectZMessageRow extends StatelessWidget {
+  final Widget avatar;
+  final bool reserveAvatarSpace;
+  final double avatarSize;
+  final double avatarGap;
 
-  const _MessageTile({
-    required this.isMine,
+  final bool showHeader;
+  final String displayName;
+  final String timeText;
+  final String content;
+
+  const _ProjectZMessageRow({
+    required this.avatar,
+    required this.reserveAvatarSpace,
+    required this.avatarSize,
+    required this.avatarGap,
+    required this.showHeader,
     required this.displayName,
-    required this.username,
-    required this.content,
     required this.timeText,
+    required this.content,
   });
 
   @override
   Widget build(BuildContext context) {
-    final bubbleColor = isMine
-        ? Theme.of(context).colorScheme.primary.withOpacity(0.18)
-        : Colors.white.withOpacity(0.08);
+    final bubbleColor = Colors.white.withOpacity(0.08);
 
-    final align = isMine ? Alignment.centerRight : Alignment.centerLeft;
-    final cross = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final avatarSlot = reserveAvatarSpace
+        ? SizedBox(width: avatarSize, height: avatarSize)
+        : avatar;
 
-    // ✅ Avatar estilo “placeholder” (sin foto de Google)
-    final avatar = CircleAvatar(
-      radius: 18,
-      backgroundColor: Colors.white.withOpacity(0.08),
-      child: Icon(
-        Icons.person,
-        size: 18,
-        color: Colors.white.withOpacity(0.85),
-      ),
-    );
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Align(
-        alignment: align,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 340),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        avatarSlot,
+        SizedBox(width: avatarGap),
+        Expanded(
           child: Column(
-            crossAxisAlignment: cross,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (!isMine) avatar,
-                  if (!isMine) const SizedBox(width: 10),
-                  Flexible(
-                    child: Column(
-                      crossAxisAlignment: cross,
-                      children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: Text(
-                                displayName,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                            if (timeText.isNotEmpty) ...[
-                              const SizedBox(width: 8),
-                              Text(
-                                timeText,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.white.withOpacity(0.6),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                        if (username.isNotEmpty)
-                          Text(
-                            username,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.white.withOpacity(0.6),
-                            ),
+              if (showHeader)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          displayName,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
                           ),
+                        ),
+                      ),
+                      if (timeText.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        Text(
+                          timeText,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.white.withOpacity(0.55),
+                          ),
+                        ),
                       ],
-                    ),
+                    ],
                   ),
-                  if (isMine) const SizedBox(width: 10),
-                  if (isMine) avatar,
-                ],
-              ),
-              const SizedBox(height: 8),
+                ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
@@ -377,7 +380,8 @@ class _MessageTile extends StatelessWidget {
             ],
           ),
         ),
-      ),
+        const SizedBox(width: 40), // aire a la derecha similar al look ProjectZ
+      ],
     );
   }
 }
