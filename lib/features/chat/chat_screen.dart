@@ -64,10 +64,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final username = (data['username'] as String?)?.trim() ?? '';
       final displayName = (data['displayName'] as String?)?.trim() ?? '';
 
-      // si no está completo, no tocamos nada
       if (username.isEmpty || displayName.isEmpty) return;
 
-      // Perfil público sin foto (estilo ProjectZ placeholder)
       await FirebaseFirestore.instance.collection('profiles').doc(uid).set(
         {
           'username': username,
@@ -84,9 +82,7 @@ class _ChatScreenState extends State<ChatScreen> {
         displayName: displayName,
         photoURL: null,
       );
-    } catch (_) {
-      // si falla, se verá "Usuario" como fallback
-    }
+    } catch (_) {}
   }
 
   Future<PublicProfile?> _loadProfile(String uid) {
@@ -114,13 +110,6 @@ class _ChatScreenState extends State<ChatScreen> {
         return null;
       }
     });
-  }
-
-  String _formatTime(DateTime dt) {
-    final local = dt.toLocal();
-    final h = local.hour.toString().padLeft(2, '0');
-    final m = local.minute.toString().padLeft(2, '0');
-    return '$h:$m';
   }
 
   void _autoScrollIfNeeded(int newCount) {
@@ -171,12 +160,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _avatarPlaceholder({bool visible = true}) {
-    // visible=false reserva hueco pero no dibuja nada (para mensajes seguidos)
     if (!visible) {
-      return SizedBox(
-        width: _avatarSize,
-        height: _avatarSize,
-      );
+      return const SizedBox(width: _avatarSize, height: _avatarSize);
     }
 
     return CircleAvatar(
@@ -192,6 +177,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.room.name),
@@ -231,9 +218,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         index > 0 ? messages[index - 1].authorId : null;
 
                     final isFirstInGroup = prevAuthorId != msg.authorId;
-
-                    // Separación: más grande cuando cambia el autor
                     final topPadding = isFirstInGroup ? 14.0 : 6.0;
+
+                    final isMine = (myUid != null && msg.authorId == myUid);
 
                     return Padding(
                       padding: EdgeInsets.only(top: topPadding),
@@ -247,20 +234,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                   ? profile!.displayName
                                   : 'Usuario';
 
-                          // En ProjectZ la hora suele ser discreta; aquí la mantenemos
-                          // pero solo en la cabecera del grupo (si quieres quitarla, lo borro).
-                          final timeText = (msg.createdAt.millisecondsSinceEpoch == 0)
-                              ? ''
-                              : _formatTime(msg.createdAt);
-
                           return _ProjectZMessageRow(
+                            isMine: isMine,
                             avatar: _avatarPlaceholder(visible: isFirstInGroup),
                             reserveAvatarSpace: !isFirstInGroup,
                             avatarSize: _avatarSize,
                             avatarGap: _avatarGap,
                             showHeader: isFirstInGroup,
                             displayName: displayName,
-                            timeText: isFirstInGroup ? timeText : '',
                             content: msg.content,
                           );
                         },
@@ -298,6 +279,8 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 class _ProjectZMessageRow extends StatelessWidget {
+  final bool isMine;
+
   final Widget avatar;
   final bool reserveAvatarSpace;
   final double avatarSize;
@@ -305,19 +288,20 @@ class _ProjectZMessageRow extends StatelessWidget {
 
   final bool showHeader;
   final String displayName;
-  final String timeText;
   final String content;
 
   const _ProjectZMessageRow({
+    required this.isMine,
     required this.avatar,
     required this.reserveAvatarSpace,
     required this.avatarSize,
     required this.avatarGap,
     required this.showHeader,
     required this.displayName,
-    required this.timeText,
     required this.content,
   });
+
+  static const double _bubbleRadius = 10; // ✅ antes 16 (más redondo)
 
   @override
   Widget build(BuildContext context) {
@@ -327,51 +311,75 @@ class _ProjectZMessageRow extends StatelessWidget {
         ? SizedBox(width: avatarSize, height: avatarSize)
         : avatar;
 
+    final bubbleDecoration = BoxDecoration(
+      color: bubbleColor,
+      borderRadius: BorderRadius.circular(_bubbleRadius),
+      border: Border.all(color: Colors.white.withOpacity(0.10)),
+    );
+
+    // Otros (izquierda)
+    if (!isMine) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          avatarSlot,
+          SizedBox(width: avatarGap),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (showHeader)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      displayName,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: bubbleDecoration,
+                  child: Text(
+                    content,
+                    style: const TextStyle(fontSize: 15, height: 1.25),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 40),
+        ],
+      );
+    }
+
+    // Tú (derecha)
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        avatarSlot,
-        SizedBox(width: avatarGap),
+        const SizedBox(width: 40),
         Expanded(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               if (showHeader)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: Text(
-                          displayName,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                      if (timeText.isNotEmpty) ...[
-                        const SizedBox(width: 8),
-                        Text(
-                          timeText,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.white.withOpacity(0.55),
-                          ),
-                        ),
-                      ],
-                    ],
+                  child: Text(
+                    displayName,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
                   ),
                 ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: bubbleColor,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white.withOpacity(0.10)),
-                ),
+                decoration: bubbleDecoration,
                 child: Text(
                   content,
                   style: const TextStyle(fontSize: 15, height: 1.25),
@@ -380,7 +388,8 @@ class _ProjectZMessageRow extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(width: 40), // aire a la derecha similar al look ProjectZ
+        SizedBox(width: avatarGap),
+        avatarSlot,
       ],
     );
   }
