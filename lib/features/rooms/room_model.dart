@@ -42,7 +42,6 @@ class Room {
 
   factory Room.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data() ?? {};
-
     final createdAt = _tsToDate(data['createdAt']);
     final sortAt = data['sortAt'] != null ? _tsToDate(data['sortAt']) : createdAt;
 

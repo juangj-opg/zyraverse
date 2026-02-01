@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../../app_entry.dart';
+
 class CreateProfileScreen extends StatefulWidget {
   const CreateProfileScreen({super.key});
 
@@ -19,8 +21,53 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
   bool _isLoading = false;
   String? _error;
 
-  String _normalizeUsername(String value) {
-    return value.trim().toLowerCase();
+  bool _prefilled = false;
+  bool _usernameLocked = false;
+  String? _lockedUsername;
+
+  String _normalizeUsername(String value) => value.trim().toLowerCase();
+
+  @override
+  void initState() {
+    super.initState();
+    _prefillFromUserDoc();
+  }
+
+  Future<void> _prefillFromUserDoc() async {
+    if (_prefilled) return;
+    _prefilled = true;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+
+      final data = snap.data();
+      if (data == null) return;
+
+      final u = (data['username'] as String?)?.trim();
+      final d = (data['displayName'] as String?)?.trim();
+      final b = (data['bio'] as String?)?.trim();
+
+      if (u != null && u.isNotEmpty) {
+        _usernameController.text = u;
+        _usernameLocked = true;
+        _lockedUsername = u;
+      }
+
+      // displayName puede venir vacío si el usuario es inválido: lo dejamos tal cual
+      if (d != null) _displayNameController.text = d;
+
+      if (b != null && b.isNotEmpty) _bioController.text = b;
+
+      if (mounted) setState(() {});
+    } catch (_) {
+      // si falla el prefill no pasa nada
+    }
   }
 
   Future<void> _submit() async {
@@ -31,60 +78,114 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
       _error = null;
     });
 
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Sesión no válida. Vuelve a iniciar sesión.';
+      });
+      return;
+    }
+
     final uid = user.uid;
 
-    final username = _normalizeUsername(_usernameController.text);
+    final username = _usernameLocked
+        ? (_lockedUsername ?? _normalizeUsername(_usernameController.text))
+        : _normalizeUsername(_usernameController.text);
+
     final displayName = _displayNameController.text.trim();
     final bio = _bioController.text.trim();
 
     final firestore = FirebaseFirestore.instance;
 
     try {
-      await firestore.runTransaction((transaction) async {
-        final usernameRef =
-            firestore.collection('usernames').doc(username);
+      await firestore.runTransaction((tx) async {
         final userRef = firestore.collection('users').doc(uid);
+        final usernameRef = firestore.collection('usernames').doc(username);
+        final profileRef = firestore.collection('profiles').doc(uid);
 
-        final usernameSnap = await transaction.get(usernameRef);
-
+        // 1) Reservar/validar username
+        final usernameSnap = await tx.get(usernameRef);
         if (usernameSnap.exists) {
-          throw Exception('USERNAME_TAKEN');
+          final data = usernameSnap.data();
+          final existingUid = data == null ? null : data['uid'];
+          if (existingUid != uid) {
+            throw Exception('USERNAME_TAKEN');
+          }
+        } else {
+          tx.set(usernameRef, {
+            'uid': uid,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
         }
 
-        transaction.set(usernameRef, {
-          'uid': uid,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+        // 2) Guardar perfil privado en users/{uid} (isValid = true)
+        tx.set(
+          userRef,
+          {
+            'username': username,
+            'displayName': displayName,
+            'bio': bio,
+            'isValid': true,
+            'validatedAt': FieldValue.serverTimestamp(),
+            // mantenemos foto/email en users (si existen) pero aquí no tocamos email
+            'photoURL': user.photoURL,
+          },
+          SetOptions(merge: true),
+        );
 
-        transaction.set(userRef, {
-          'username': username,
-          'displayName': displayName,
-          'bio': bio,
-          'isValid': true,
-          'validatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+        // 3) Guardar perfil público en profiles/{uid} (para pintar autores en chat)
+        tx.set(
+          profileRef,
+          {
+            'username': username,
+            'displayName': displayName,
+            'photoURL': user.photoURL,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
       });
+
+      if (!mounted) return;
+
+      // Volver al gate principal (AppEntry) para que redirija a salas si ya eres válido
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const AppEntry()),
+        (route) => false,
+      );
     } catch (e) {
+      if (!mounted) return;
+
+      final s = e.toString().toLowerCase();
       setState(() {
-        if (e.toString().contains('USERNAME_TAKEN')) {
+        if (s.contains('username_taken')) {
           _error = 'Ese nombre de usuario ya está en uso.';
+        } else if (s.contains('permission-denied') || s.contains('permission denied')) {
+          _error = 'Permiso denegado al guardar el perfil (Firestore Rules).';
         } else {
-          _error = 'Error al crear el perfil. Inténtalo de nuevo.';
+          _error = 'Error al guardar el perfil. Inténtalo de nuevo.';
         }
         _isLoading = false;
       });
-      return;
     }
+  }
 
-    // Si todo fue bien, AppEntry redirigirá automáticamente
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _displayNameController.dispose();
+    _bioController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final title = _usernameLocked ? 'Editar perfil' : 'Crear perfil';
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Crear perfil'),
+        title: Text(title),
         automaticallyImplyLeading: false,
       ),
       body: Padding(
@@ -95,10 +196,13 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
             children: [
               TextFormField(
                 controller: _usernameController,
-                decoration: const InputDecoration(
+                enabled: !_usernameLocked,
+                decoration: InputDecoration(
                   labelText: 'Usuario (@username)',
+                  helperText: _usernameLocked ? 'El username ya está fijado.' : null,
                 ),
                 validator: (value) {
+                  if (_usernameLocked) return null;
                   if (value == null || value.trim().isEmpty) {
                     return 'Introduce un nombre de usuario';
                   }
@@ -146,8 +250,12 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
                 child: ElevatedButton(
                   onPressed: _isLoading ? null : _submit,
                   child: _isLoading
-                      ? const CircularProgressIndicator()
-                      : const Text('Crear perfil'),
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(_usernameLocked ? 'Guardar perfil' : 'Crear perfil'),
                 ),
               ),
             ],
