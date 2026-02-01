@@ -26,6 +26,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, Future<PublicProfile?>> _profileFutureCache = {};
 
   int _lastMessageCount = 0;
+  bool _myProfileEnsured = false;
 
   @override
   void initState() {
@@ -33,6 +34,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
+
+    // Importante: asegura tu perfil público si falta o está incompleto
+    _ensureMyPublicProfile();
   }
 
   @override
@@ -40,6 +44,51 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _ensureMyPublicProfile() async {
+    if (_myProfileEnsured) return;
+    _myProfileEnsured = true;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final uid = user.uid;
+
+    try {
+      // Leemos tu doc privado (siempre permitido para ti)
+      final userSnap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final data = userSnap.data();
+      if (data == null) return;
+
+      final username = (data['username'] as String?)?.trim() ?? '';
+      final displayName = (data['displayName'] as String?)?.trim() ?? '';
+
+      // Si aún no está completo, no hacemos nada (no eres "válido" todavía)
+      if (username.isEmpty || displayName.isEmpty) return;
+
+      // Creamos/actualizamos tu perfil público
+      await FirebaseFirestore.instance.collection('profiles').doc(uid).set(
+        {
+          'username': username,
+          'displayName': displayName,
+          'photoURL': user.photoURL,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      // Cache directo para que no salga "Usuario"
+      final p = PublicProfile(
+        uid: uid,
+        username: username,
+        displayName: displayName,
+        photoURL: user.photoURL,
+      );
+      _profileCache[uid] = p;
+    } catch (_) {
+      // Si falla, simplemente el UI caerá al fallback
+    }
   }
 
   Future<PublicProfile?> _loadProfile(String uid) {
@@ -70,8 +119,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String _formatTime(DateTime dt) {
-    final h = dt.hour.toString().padLeft(2, '0');
-    final m = dt.minute.toString().padLeft(2, '0');
+    // ✅ Esto arregla el típico desfase si el DateTime viene en UTC
+    final local = dt.toLocal();
+    final h = local.hour.toString().padLeft(2, '0');
+    final m = local.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
 
@@ -167,12 +218,21 @@ class _ChatScreenState extends State<ChatScreen> {
                       builder: (context, profSnap) {
                         final profile = profSnap.data;
 
-                        final displayName = (profile?.displayName.isNotEmpty == true)
-                            ? profile!.displayName
-                            : 'Usuario';
-                        final username = (profile?.username.isNotEmpty == true)
-                            ? '@${profile!.username}'
-                            : '';
+                        // ✅ Ahora si es tu mensaje, y aún no hay profile por lo que sea,
+                        // intentamos usar el caché (asegurado en _ensureMyPublicProfile)
+                        final effectiveProfile = (profile == null && isMine)
+                            ? _profileCache[myUid] ?? profile
+                            : profile;
+
+                        final displayName =
+                            (effectiveProfile?.displayName.isNotEmpty == true)
+                                ? effectiveProfile!.displayName
+                                : 'Usuario';
+
+                        final username =
+                            (effectiveProfile?.username.isNotEmpty == true)
+                                ? '@${effectiveProfile!.username}'
+                                : '';
 
                         final timeText = msg.createdAt.millisecondsSinceEpoch == 0
                             ? ''
@@ -182,7 +242,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           isMine: isMine,
                           displayName: displayName,
                           username: username,
-                          photoURL: profile?.photoURL,
+                          photoURL: effectiveProfile?.photoURL,
                           content: msg.content,
                           timeText: timeText,
                         );
