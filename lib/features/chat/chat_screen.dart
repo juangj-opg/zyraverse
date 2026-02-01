@@ -17,16 +17,16 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
 
+  late final DocumentReference<Map<String, dynamic>> _roomRef;
   late final CollectionReference<Map<String, dynamic>> _messagesRef;
 
   @override
   void initState() {
     super.initState();
 
-    _messagesRef = FirebaseFirestore.instance
-        .collection('rooms')
-        .doc(widget.room.id)
-        .collection('messages');
+    _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
+
+    _messagesRef = _roomRef.collection('messages');
   }
 
   Future<void> _sendMessage() async {
@@ -38,11 +38,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _controller.clear();
 
-    await _messagesRef.add({
+    final preview = text.length > 80 ? '${text.substring(0, 80)}…' : text;
+
+    final batch = FirebaseFirestore.instance.batch();
+
+    final messageDoc = _messagesRef.doc(); // id generado
+    batch.set(messageDoc, {
       'authorId': user.uid,
       'content': text,
       'createdAt': FieldValue.serverTimestamp(),
     });
+
+    batch.set(_roomRef, {
+      'lastMessagePreview': preview,
+      'lastMessageAt': FieldValue.serverTimestamp(),
+      'sortAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await batch.commit();
   }
 
   @override
@@ -55,20 +68,14 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Expanded(
             child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              stream: _messagesRef
-                  .orderBy('createdAt', descending: false)
-                  .snapshots(),
+              stream: _messagesRef.orderBy('createdAt', descending: false).snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(
-                    child: CircularProgressIndicator(),
-                  );
+                  return const Center(child: CircularProgressIndicator());
                 }
 
                 if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                  return const Center(
-                    child: Text('No hay mensajes'),
-                  );
+                  return const Center(child: Text('No hay mensajes'));
                 }
 
                 final messages = snapshot.data!.docs
@@ -80,7 +87,6 @@ class _ChatScreenState extends State<ChatScreen> {
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msg = messages[index];
-
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       child: Text(msg.content),
@@ -100,6 +106,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       hintText: 'Escribe tu mensaje...',
                       contentPadding: EdgeInsets.all(12),
                     ),
+                    onSubmitted: (_) => _sendMessage(),
                   ),
                 ),
                 IconButton(

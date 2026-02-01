@@ -57,13 +57,13 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
           'createdAt': FieldValue.serverTimestamp(),
         });
 
-        transaction.update(userRef, {
+        transaction.set(userRef, {
           'username': username,
           'displayName': displayName,
           'bio': bio,
           'isValid': true,
           'validatedAt': FieldValue.serverTimestamp(),
-        });
+        }, SetOptions(merge: true));
       });
     } catch (e) {
       setState(() {
