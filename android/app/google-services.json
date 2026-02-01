@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "994014069765",
+    "project_id": "zyraverse-321",
+    "storage_bucket": "zyraverse-321.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:994014069765:android:7b5473603fb4be24a8086c",
+        "android_client_info": {
+          "package_name": "com.example.zyraverse"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDpZ8LxIVQErP7djwkp6KsHGCmw2XbjEXQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
