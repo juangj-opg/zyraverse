@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import '../rooms/room_model.dart';
 import 'message_model.dart';
@@ -17,6 +17,18 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
 
+  late final CollectionReference<Map<String, dynamic>> _messagesRef;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _messagesRef = FirebaseFirestore.instance
+        .collection('rooms')
+        .doc(widget.room.id)
+        .collection('messages');
+  }
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
@@ -24,20 +36,17 @@ class _ChatScreenState extends State<ChatScreen> {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    await FirebaseFirestore.instance.collection('messages').add({
-      'roomId': widget.room.id,
+    _controller.clear();
+
+    await _messagesRef.add({
       'authorId': user.uid,
       'content': text,
       'createdAt': FieldValue.serverTimestamp(),
     });
-
-    _controller.clear();
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentUid = FirebaseAuth.instance.currentUser?.uid;
-
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.room.name),
@@ -45,49 +54,36 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('messages')
-                  .where('roomId', isEqualTo: widget.room.id)
-                  .orderBy('createdAt')
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: _messagesRef
+                  .orderBy('createdAt', descending: false)
                   .snapshots(),
               builder: (context, snapshot) {
-                if (!snapshot.hasData) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(
                     child: CircularProgressIndicator(),
                   );
                 }
 
-                final messages = snapshot.data!.docs.map((doc) {
-                  return Message.fromFirestore(
-                    doc.id,
-                    doc.data() as Map<String, dynamic>,
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return const Center(
+                    child: Text('No hay mensajes'),
                   );
-                }).toList();
+                }
+
+                final messages = snapshot.data!.docs
+                    .map((doc) => Message.fromFirestore(doc))
+                    .toList();
 
                 return ListView.builder(
                   padding: const EdgeInsets.all(12),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msg = messages[index];
-                    final isMe = msg.authorId == currentUid;
 
-                    return Align(
-                      alignment:
-                          isMe ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.all(10),
-                        constraints: const BoxConstraints(maxWidth: 320),
-                        decoration: BoxDecoration(
-                          color: isMe ? Colors.blue : Colors.grey.shade800,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          msg.content,
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      ),
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(msg.content),
                     );
                   },
                 );
@@ -101,7 +97,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: TextField(
                     controller: _controller,
                     decoration: const InputDecoration(
-                      hintText: 'Escribe un mensaje...',
+                      hintText: 'Escribe tu mensaje...',
                       contentPadding: EdgeInsets.all(12),
                     ),
                   ),
