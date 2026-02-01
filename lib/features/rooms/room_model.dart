@@ -1,44 +1,49 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-class Room {
+class RoomModel {
   final String id;
-  final String name;
-  final RoomType type;
-  final int membersCount;
-  final DateTime createdAt;
+  final String name; // "TOA"
+  final String type; // "public" | "private"
+  final String? ownerId;
 
-  const Room({
+  final int membersCount;
+
+  final String lastMessageText;
+  final DateTime? lastMessageAt;
+
+  const RoomModel({
     required this.id,
     required this.name,
     required this.type,
     required this.membersCount,
-    required this.createdAt,
+    required this.lastMessageText,
+    required this.lastMessageAt,
+    this.ownerId,
   });
 
-  factory Room.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? {};
+  static DateTime? _parseDate(dynamic v) {
+    if (v is Timestamp) return v.toDate();
+    if (v is DateTime) return v;
+    return null;
+  }
 
-    final typeRaw = (data['type'] as String?)?.toLowerCase() ?? 'public';
-    final membersCountRaw = data['membersCount'];
-    final createdAtRaw = data['createdAt'];
+  factory RoomModel.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? <String, dynamic>{};
 
-    return Room(
+    final mc = data['membersCount'];
+    final membersCount = mc is num ? mc.toInt() : 0;
+
+    return RoomModel(
       id: doc.id,
-      name: (data['name'] as String?)?.trim().isNotEmpty == true
-          ? (data['name'] as String).trim()
-          : 'Sala ${doc.id}',
-      type: typeRaw == 'group' ? RoomType.group : RoomType.public,
-      membersCount: membersCountRaw is int
-          ? membersCountRaw
-          : (membersCountRaw is num ? membersCountRaw.toInt() : 0),
-      createdAt: createdAtRaw is Timestamp
-          ? createdAtRaw.toDate()
-          : DateTime.fromMillisecondsSinceEpoch(0),
+      name: (data['name'] ?? 'Sala').toString(),
+      type: (data['type'] ?? 'public').toString(),
+      ownerId: data['ownerId']?.toString(),
+      membersCount: membersCount,
+      lastMessageText: (data['lastMessageText'] ?? 'Sin mensajes aún').toString(),
+      lastMessageAt: _parseDate(data['lastMessageAt']),
     );
   }
-}
 
-enum RoomType {
-  public,
-  group,
+  String get typeLabel => type == 'private' ? 'Privada' : 'Pública';
+  bool get isPublic => type != 'private';
 }

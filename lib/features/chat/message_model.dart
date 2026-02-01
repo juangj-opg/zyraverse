@@ -2,44 +2,48 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 enum MessageType { user, system }
 
-class Message {
+class MessageModel {
   final String id;
   final MessageType type;
 
-  // Solo para type=user
   final String? authorId;
+  final String? authorDisplayName;
 
-  final String content;
+  final String text;
   final DateTime createdAt;
 
-  Message({
+  const MessageModel({
     required this.id,
     required this.type,
-    required this.content,
+    required this.text,
     required this.createdAt,
     this.authorId,
+    this.authorDisplayName,
   });
 
-  factory Message.fromFirestore(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) {
-    final data = doc.data() ?? {};
+  bool get isSystem => type == MessageType.system;
 
-    final typeRaw = (data['type'] as String?)?.toLowerCase() ?? 'user';
-    final createdAtRaw = data['createdAt'];
+  static MessageType _parseType(dynamic v) {
+    final s = (v ?? 'user').toString();
+    return s == 'system' ? MessageType.system : MessageType.user;
+  }
 
-    final created = createdAtRaw is Timestamp
-        ? createdAtRaw.toDate().toLocal()
-        : DateTime.fromMillisecondsSinceEpoch(0).toLocal();
+  static DateTime _parseDate(dynamic v) {
+    if (v is Timestamp) return v.toDate();
+    if (v is DateTime) return v;
+    // Cuando aún no ha llegado serverTimestamp:
+    return DateTime.now();
+  }
 
-    final msgType = typeRaw == 'system' ? MessageType.system : MessageType.user;
-
-    return Message(
+  factory MessageModel.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? <String, dynamic>{};
+    return MessageModel(
       id: doc.id,
-      type: msgType,
-      authorId: msgType == MessageType.user ? (data['authorId'] as String?) : null,
-      content: (data['content'] as String?) ?? '',
-      createdAt: created,
+      type: _parseType(data['type']),
+      authorId: data['authorId']?.toString(),
+      authorDisplayName: data['authorDisplayName']?.toString(),
+      text: (data['text'] ?? '').toString(),
+      createdAt: _parseDate(data['createdAt']),
     );
   }
 }

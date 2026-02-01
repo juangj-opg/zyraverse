@@ -6,7 +6,6 @@ import 'features/auth/login_screen.dart';
 import 'features/auth/create_profile_screen.dart';
 import 'features/auth/banned_screen.dart';
 import 'features/rooms/room_list_screen.dart';
-import 'core/services/rooms_service.dart';
 
 class AppEntry extends StatelessWidget {
   const AppEntry({super.key});
@@ -41,7 +40,6 @@ class _UserGateState extends State<_UserGate> {
   late final DocumentReference<Map<String, dynamic>> _userRef;
   late final Future<void> _bootstrapFuture;
 
-  Future<void>? _roomsSeedFuture;
   bool _validityFixDone = false;
 
   @override
@@ -51,6 +49,8 @@ class _UserGateState extends State<_UserGate> {
     _bootstrapFuture = _bootstrapUserDoc();
   }
 
+  /// Crea el documento users/{uid} si no existe.
+  /// Importante: NO dependemos de la UI para “crear” el doc. Se hace aquí y punto.
   Future<void> _bootstrapUserDoc() async {
     final firestore = FirebaseFirestore.instance;
 
@@ -61,26 +61,41 @@ class _UserGateState extends State<_UserGate> {
         tx.set(_userRef, {
           'uid': widget.user.uid,
           'email': widget.user.email,
+          // Guardamos photoURL por si algún día lo quieres, pero la UI NO lo usa.
+          // Si prefieres no guardarlo, ponlo a null.
           'photoURL': widget.user.photoURL,
+
+          // Flags
           'isValid': false,
           'isBanned': false,
           'bannedUntil': null,
           'role': 'user',
-          'createdAt': FieldValue.serverTimestamp(),
-          'validatedAt': null,
+
+          // Perfil (obligatorio)
           'username': null,
           'displayName': null,
           'bio': null,
+
+          // Tiempos
+          'createdAt': FieldValue.serverTimestamp(),
+          'validatedAt': null,
         });
       } else {
-        tx.set(_userRef, {
-          'email': widget.user.email,
-          'photoURL': widget.user.photoURL,
-        }, SetOptions(merge: true));
+        // Mantener email/photoURL actualizados sin tocar el resto
+        tx.set(
+          _userRef,
+          {
+            'email': widget.user.email,
+            'photoURL': widget.user.photoURL,
+          },
+          SetOptions(merge: true),
+        );
       }
     });
   }
 
+  /// Si alguien “rompe” a mano isValid o el perfil queda inconsistente,
+  /// lo reparamos SIN escribir durante el build.
   void _fixValidityIfNeeded({
     required bool hasProfile,
     required bool isValid,
@@ -95,7 +110,6 @@ class _UserGateState extends State<_UserGate> {
 
     _validityFixDone = true;
 
-    // Evitar writes en mitad del build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _userRef.set({'isValid': hasProfile}, SetOptions(merge: true));
     });
@@ -135,11 +149,12 @@ class _UserGateState extends State<_UserGate> {
             if (data == null) return const _LoadingScaffold();
 
             final isBanned = data['isBanned'] == true;
-            final bannedUntil = data['bannedUntil'];
+            final bannedUntilRaw = data['bannedUntil'];
             final isValid = data['isValid'] == true;
 
             final username = (data['username'] as String?)?.trim();
             final displayName = (data['displayName'] as String?)?.trim();
+
             final hasProfile =
                 (username != null && username.isNotEmpty) &&
                 (displayName != null && displayName.isNotEmpty);
@@ -147,38 +162,18 @@ class _UserGateState extends State<_UserGate> {
             _fixValidityIfNeeded(hasProfile: hasProfile, isValid: isValid);
 
             final now = DateTime.now();
-            if (isBanned &&
-                (bannedUntil == null ||
-                    (bannedUntil as Timestamp).toDate().isAfter(now))) {
+            final bannedUntil = bannedUntilRaw is Timestamp ? bannedUntilRaw.toDate() : null;
+
+            if (isBanned && (bannedUntil == null || bannedUntil.isAfter(now))) {
               return const BannedScreen();
             }
 
-            // PERFIL OBLIGATORIO (tu regla exacta)
+            // REGLA: perfil obligatorio sí o sí (y además isValid coherente).
             if (!hasProfile || !isValid) {
               return const CreateProfileScreen();
             }
 
-            // Usuario válido => seed automático de rooms
-            _roomsSeedFuture ??=
-                RoomsService().ensureDefaultRooms(seededByUid: widget.user.uid);
-
-            return FutureBuilder<void>(
-              future: _roomsSeedFuture,
-              builder: (context, seedSnap) {
-                if (seedSnap.connectionState != ConnectionState.done) {
-                  return const _LoadingScaffold();
-                }
-
-                if (seedSnap.hasError) {
-                  return _ErrorScaffold(
-                    title: 'Error creando salas',
-                    message: seedSnap.error.toString(),
-                  );
-                }
-
-                return const RoomListScreen();
-              },
-            );
+            return RoomListScreen();
           },
         );
       },
@@ -201,7 +196,10 @@ class _ErrorScaffold extends StatelessWidget {
   final String title;
   final String message;
 
-  const _ErrorScaffold({required this.title, required this.message});
+  const _ErrorScaffold({
+    required this.title,
+    required this.message,
+  });
 
   @override
   Widget build(BuildContext context) {

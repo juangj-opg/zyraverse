@@ -1,436 +1,178 @@
-import 'dart:async';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
+import '../../core/services/message_service.dart';
+import '../../core/services/rooms_service.dart';
 import '../rooms/room_model.dart';
 import 'message_model.dart';
 
 class ChatScreen extends StatefulWidget {
-  final Room room;
-
-  const ChatScreen({super.key, required this.room});
+  final String roomId;
+  const ChatScreen({super.key, required this.roomId});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+class _ChatItem {
+  final MessageModel? message;
+  final String? separatorText;
+
+  const _ChatItem._({this.message, this.separatorText});
+
+  bool get isSeparator => separatorText != null;
+
+  factory _ChatItem.message(MessageModel m) => _ChatItem._(message: m);
+  factory _ChatItem.separator(String text) => _ChatItem._(separatorText: text);
+}
+
 class _ChatScreenState extends State<ChatScreen> {
-  static const Duration _timeGapForSeparator = Duration(hours: 3);
+  final _textCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
 
-  final TextEditingController _controller = TextEditingController();
+  final RoomsService _roomsService = RoomsService();
+  final MessageService _messageService = MessageService();
 
-  late final DocumentReference<Map<String, dynamic>> _roomRef;
-  late final CollectionReference<Map<String, dynamic>> _messagesRef;
-  late final CollectionReference<Map<String, dynamic>> _membersRef;
+  String _myDisplayName = 'Usuario';
+  bool _loadingProfile = true;
 
-  final Map<String, _PublicProfile> _profileCache = {};
-  final Set<String> _loadingProfiles = {};
-
-  StreamSubscription? _roomSub;
-
-  int _membersCountLive = 0;
+  String get _uid => FirebaseAuth.instance.currentUser!.uid;
 
   @override
   void initState() {
     super.initState();
-
-    _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
-    _messagesRef = _roomRef.collection('messages');
-    _membersRef = _roomRef.collection('members');
-
-    // membersCount “real” desde el doc de la room (MVP)
-    _roomSub = _roomRef.snapshots().listen((snap) {
-      final data = snap.data();
-      if (data == null) return;
-      final raw = data['membersCount'];
-      final count = raw is int ? raw : (raw is num ? raw.toInt() : 0);
-
-      if (mounted) {
-        setState(() => _membersCountLive = count);
-      }
-    });
+    _loadMyProfile();
   }
 
   @override
   void dispose() {
-    _roomSub?.cancel();
-    _controller.dispose();
+    _textCtrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
   }
 
-  User? get _currentUser => FirebaseAuth.instance.currentUser;
-
-  DocumentReference<Map<String, dynamic>>? _myMemberRef() {
-    final user = _currentUser;
-    if (user == null) return null;
-    return _membersRef.doc(user.uid);
+  Future<void> _loadMyProfile() async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(_uid).get();
+      final data = doc.data() ?? {};
+      final dn = (data['displayName'] ?? '').toString().trim();
+      if (dn.isNotEmpty) _myDisplayName = dn;
+    } finally {
+      if (mounted) setState(() => _loadingProfile = false);
+    }
   }
 
-  Future<_PublicProfile> _getMyProfile() async {
-    final user = _currentUser;
-    if (user == null) {
-      return const _PublicProfile(displayName: 'Usuario', username: '');
-    }
+  void _scrollToBottomSoon() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollCtrl.hasClients) return;
+      _scrollCtrl.animateTo(
+        _scrollCtrl.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
+  }
 
-    final uid = user.uid;
-    if (_profileCache.containsKey(uid)) return _profileCache[uid]!;
+  // "29 sept 2021, 14:43"
+  String _formatGapSeparator(DateTime dt) {
+    const months = ['ene','feb','mar','abr','may','jun','jul','ago','sept','oct','nov','dic'];
+    final d = dt.day.toString().padLeft(2, '0');
+    final m = months[(dt.month - 1).clamp(0, 11)];
+    final y = dt.year.toString();
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    return '$d $m $y, $hh:$mm';
+  }
 
-    final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-    final data = snap.data() ?? {};
-
-    final p = _PublicProfile(
-      displayName: (data['displayName'] as String?)?.trim().isNotEmpty == true
-          ? (data['displayName'] as String).trim()
-          : 'Usuario',
-      username: (data['username'] as String?)?.trim() ?? '',
+  Future<void> _joinRoom() async {
+    await _roomsService.joinRoom(roomId: widget.roomId, displayName: _myDisplayName);
+    await _messageService.sendSystemMessage(
+      roomId: widget.roomId,
+      text: '$_myDisplayName se ha unido a esta sala.',
     );
-
-    _profileCache[uid] = p;
-    return p;
   }
 
-  Future<void> _ensureProfilesLoaded(Iterable<String> uids) async {
-    final toLoad = uids
-        .where((id) => id.trim().isNotEmpty)
-        .where((id) => !_profileCache.containsKey(id))
-        .where((id) => !_loadingProfiles.contains(id))
-        .toList();
+  Future<void> _leaveRoom() async {
+    await _roomsService.leaveRoom(roomId: widget.roomId);
+    await _messageService.sendSystemMessage(
+      roomId: widget.roomId,
+      text: '$_myDisplayName ha abandonado esta sala.',
+    );
+  }
 
-    if (toLoad.isEmpty) return;
-
-    for (final uid in toLoad) {
-      _loadingProfiles.add(uid);
-      unawaited(() async {
-        try {
-          final snap =
-              await FirebaseFirestore.instance.collection('users').doc(uid).get();
-          final data = snap.data() ?? {};
-          final p = _PublicProfile(
-            displayName: (data['displayName'] as String?)?.trim().isNotEmpty == true
-                ? (data['displayName'] as String).trim()
-                : 'Usuario',
-            username: (data['username'] as String?)?.trim() ?? '',
-          );
-          _profileCache[uid] = p;
-        } finally {
-          _loadingProfiles.remove(uid);
-          if (mounted) setState(() {});
-        }
-      }());
+  Future<void> _sendMessage(bool isMember) async {
+    if (!isMember) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Debes unirte a la sala para poder escribir.')),
+      );
+      return;
     }
-  }
 
-  Future<void> _sendMessage() async {
-    final text = _controller.text.trim();
+    final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
 
-    final user = _currentUser;
-    if (user == null) return;
-
-    _controller.clear();
-
-    await _messagesRef.add({
-      'type': 'user',
-      'authorId': user.uid,
-      'content': text,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
-  }
-
-  Future<void> _sendSystem(String text) async {
-    await _messagesRef.add({
-      'type': 'system',
-      'content': text,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
-  }
-
-  Future<void> _joinAsMember() async {
-    final user = _currentUser;
-    final myMemberRef = _myMemberRef();
-    if (user == null || myMemberRef == null) return;
-
-    final profile = await _getMyProfile();
-
-    // 1) Crear member + incrementar contador (transaction)
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      final memberSnap = await tx.get(myMemberRef);
-      if (memberSnap.exists) return;
-
-      tx.set(myMemberRef, {
-        'uid': user.uid,
-        'role': 'member',
-        'joinedAt': FieldValue.serverTimestamp(),
-        'displayNameSnapshot': profile.displayName,
-      });
-
-      tx.set(_roomRef, {
-        'membersCount': FieldValue.increment(1),
-      }, SetOptions(merge: true));
-    });
-
-    // 2) Mensaje system (ya eres miembro, y rules lo permitirán)
-    await _sendSystem('${profile.displayName} se ha unido a esta Fiesta.');
-  }
-
-  Future<void> _leaveAsMember() async {
-    final user = _currentUser;
-    final myMemberRef = _myMemberRef();
-    if (user == null || myMemberRef == null) return;
-
-    final profile = await _getMyProfile();
-
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      final memberSnap = await tx.get(myMemberRef);
-      if (!memberSnap.exists) return;
-
-      tx.delete(myMemberRef);
-
-      // Evitar negativos (MVP): si no existe el campo, asumimos 0
-      final roomSnap = await tx.get(_roomRef);
-      final data = roomSnap.data() ?? {};
-      final raw = data['membersCount'];
-      final current = raw is int ? raw : (raw is num ? raw.toInt() : 0);
-      final next = (current - 1) < 0 ? 0 : (current - 1);
-
-      tx.set(_roomRef, {
-        'membersCount': next,
-      }, SetOptions(merge: true));
-    });
-
-    await _sendSystem('${profile.displayName} ha abandonado esta Fiesta.');
-  }
-
-  String _two(int v) => v < 10 ? '0$v' : '$v';
-
-  String _formatSeparator(DateTime dt) {
-    final months = const [
-      'ene',
-      'feb',
-      'mar',
-      'abr',
-      'may',
-      'jun',
-      'jul',
-      'ago',
-      'sept',
-      'oct',
-      'nov',
-      'dic',
-    ];
-
-    final m = months[dt.month - 1];
-    return '${dt.day} $m ${dt.year}, ${_two(dt.hour)}:${_two(dt.minute)}';
-  }
-
-  bool _isDifferentDay(DateTime a, DateTime b) {
-    return a.year != b.year || a.month != b.month || a.day != b.day;
-  }
-
-  List<_ChatItem> _buildItemsWithSeparators(List<Message> messages) {
-    final items = <_ChatItem>[];
-    Message? prev;
-
-    for (final msg in messages) {
-      if (prev != null) {
-        final changedDay = _isDifferentDay(prev!.createdAt, msg.createdAt);
-        final gap = msg.createdAt.difference(prev!.createdAt);
-
-        if (changedDay || gap >= _timeGapForSeparator) {
-          items.add(_ChatItem.separator(_formatSeparator(msg.createdAt)));
-        }
-      }
-
-      items.add(_ChatItem.message(msg));
-      prev = msg;
-    }
-
-    return items;
-  }
-
-  Widget _buildRoomHeader({
-    required bool isMember,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-      child: Column(
-        children: [
-          // FILA 1: back + img sala + nombre + owner + info
-          Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => Navigator.pop(context),
-              ),
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: Colors.white10,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.image_outlined, size: 20),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.room.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    const Text(
-                      '(Owner: pendiente)',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.white60,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.info_outline),
-                onPressed: () => _openInfoSheet(isMember: isMember),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 8),
-
-          // FILA 2: Noticias (izq) + miembros (der)
-          Row(
-            children: [
-              Expanded(
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(12),
-                  onTap: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Noticias (pendiente)')),
-                    );
-                  },
-                  child: Container(
-                    height: 44,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.white10,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Row(
-                      children: [
-                        Icon(Icons.campaign_outlined, size: 18),
-                        SizedBox(width: 10),
-                        Text(
-                          'Noticias',
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                        ),
-                        Spacer(),
-                        Icon(Icons.chevron_right),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              _MembersMini(
-                roomId: widget.room.id,
-                membersCount: _membersCountLive,
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 10),
-
-          // FILA 3: Roleplay selector placeholder
-          Container(
-            height: 44,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: BoxDecoration(
-              color: Colors.white10,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Row(
-              children: [
-                Icon(Icons.shield_outlined, size: 18),
-                SizedBox(width: 10),
-                Text(
-                  'Roleplay',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                ),
-                Spacer(),
-                Icon(Icons.expand_more),
-              ],
-            ),
-          ),
-        ],
-      ),
+    _textCtrl.clear();
+    await _messageService.sendUserMessage(
+      roomId: widget.roomId,
+      text: text,
+      authorDisplayName: _myDisplayName,
     );
+    _scrollToBottomSoon();
   }
 
   void _openInfoSheet({required bool isMember}) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF151515),
+      backgroundColor: const Color(0xFF12121A),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
-      builder: (context) {
+      builder: (_) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
                   width: 44,
-                  height: 4,
+                  height: 5,
                   decoration: BoxDecoration(
                     color: Colors.white24,
-                    borderRadius: BorderRadius.circular(99),
+                    borderRadius: BorderRadius.circular(10),
                   ),
                 ),
                 const SizedBox(height: 14),
-                Text(
-                  widget.room.name,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Sala: ${widget.room.type == RoomType.public ? 'pública' : 'grupo'} · ID: ${widget.room.id}',
-                  style: const TextStyle(color: Colors.white60),
-                ),
-                const SizedBox(height: 18),
-                if (!isMember)
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        Navigator.pop(context);
-                        await _joinAsMember();
-                      },
-                      child: const Text('Unirme a la sala'),
+                const Row(
+                  children: [
+                    Icon(Icons.info_outline, color: Colors.white70),
+                    SizedBox(width: 10),
+                    Text(
+                      'Información de la sala',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                     ),
-                  )
-                else
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Placeholder: aquí irá la información completa, miembros, reglas, etc.',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 16),
+                if (isMember)
                   SizedBox(
                     width: double.infinity,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.redAccent.withOpacity(0.9),
-                      ),
+                    child: OutlinedButton(
                       onPressed: () async {
                         Navigator.pop(context);
-                        await _leaveAsMember();
+                        await _leaveRoom();
                       },
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white24),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
                       child: const Text('Abandonar sala'),
                     ),
                   ),
@@ -442,405 +184,507 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildSystemMessage(String text) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.35),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Text(
-            text,
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
+  // Preview de miembros tipo ProjectZ: iconos pisados y número (sin “marco” alrededor)
+  Widget _membersPreviewCount(int countIcons) {
+    final n = countIcons.clamp(0, 3);
+    return SizedBox(
+      width: 70,
+      height: 24,
+      child: Stack(
+        children: List.generate(n, (i) {
+          final left = (i * 14).toDouble();
+          return Positioned(
+            left: left,
+            top: 0,
+            child: CircleAvatar(
+              radius: 10,
+              backgroundColor: const Color(0xFF1C1C26),
+              child: Icon(Icons.person, size: 14, color: Colors.white.withOpacity(0.85)),
             ),
-            textAlign: TextAlign.center,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTimeSeparator(String text) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.35),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Text(
-            text,
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAvatarPlaceholder({double radius = 18}) {
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: Colors.white12,
-      child: Icon(Icons.person, size: radius, color: Colors.white70),
-    );
-  }
-
-  Widget _buildChatBubble({
-    required bool isMine,
-    required String displayName,
-    required String text,
-    required bool showHeader,
-  }) {
-    final bubbleColor = Colors.white10;
-    final alignment = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-
-    final bubbleRadius = BorderRadius.circular(12); // <- ya reducido, estilo ProjectZ-ish
-
-    final bubble = Container(
-      constraints: const BoxConstraints(maxWidth: 260),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-      decoration: BoxDecoration(
-        color: bubbleColor,
-        borderRadius: bubbleRadius,
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(fontSize: 14.5),
-      ),
-    );
-
-    if (!showHeader) {
-      return Column(
-        crossAxisAlignment: alignment,
-        children: [
-          bubble,
-          const SizedBox(height: 8),
-        ],
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: alignment,
-      children: [
-        Row(
-          mainAxisAlignment: isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            if (!isMine) ...[
-              _buildAvatarPlaceholder(radius: 18),
-              const SizedBox(width: 10),
-              Text(
-                displayName,
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-            ] else ...[
-              Text(
-                displayName,
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(width: 10),
-              _buildAvatarPlaceholder(radius: 18),
-            ],
-          ],
-        ),
-        const SizedBox(height: 6),
-        bubble,
-        const SizedBox(height: 10),
-      ],
-    );
-  }
-
-  Widget _buildComposer({required bool isMember}) {
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.2),
-          border: const Border(
-            top: BorderSide(color: Colors.white10),
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // fila input
-            Row(
-              children: [
-                // Placeholder futuro selector personaje/usuario
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: Colors.white12,
-                  child: const Icon(Icons.person, color: Colors.white70),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    enabled: isMember,
-                    decoration: InputDecoration(
-                      hintText: isMember
-                          ? 'Escribe tu mensaje...'
-                          : 'Únete a la sala para hablar...',
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                      filled: true,
-                      fillColor: Colors.white10,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: Colors.white10,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.send),
-                    onPressed: isMember
-                        ? _sendMessage
-                        : () async {
-                            // si no es miembro, abrimos join rápido
-                            await _joinAsMember();
-                          },
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 10),
-
-            // fila iconos (placeholder futuro)
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: const [
-                _BottomIcon(Icons.multitrack_audio),
-                _BottomIcon(Icons.image_outlined),
-                _BottomIcon(Icons.emoji_emotions_outlined),
-                _BottomIcon(Icons.auto_awesome_outlined),
-                _BottomIcon(Icons.casino_outlined),
-                _BottomIcon(Icons.add),
-              ],
-            ),
-          ],
-        ),
+          );
+        }),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final user = _currentUser;
+    final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       return const Scaffold(
-        body: Center(child: Text('No autenticado')),
+        backgroundColor: Color(0xFF0B0B0F),
+        body: Center(child: Text('No autenticado', style: TextStyle(color: Colors.white70))),
       );
     }
 
-    final myMemberRef = _myMemberRef()!;
-
     return Scaffold(
+      backgroundColor: const Color(0xFF0B0B0F),
       body: SafeArea(
-        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: myMemberRef.snapshots(),
-          builder: (context, memberSnap) {
-            final isMember = memberSnap.data?.exists == true;
+        child: StreamBuilder<RoomModel?>(
+          stream: _roomsService.watchRoom(widget.roomId),
+          builder: (context, roomSnap) {
+            final room = roomSnap.data;
 
-            return Column(
-              children: [
-                _buildRoomHeader(isMember: isMember),
-                const Divider(height: 1, color: Colors.white10),
+            final roomName = room?.name ?? 'Sala';
+            final ownerLine = '(Owner: pendiente)';
 
-                Expanded(
-                  child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: _messagesRef
-                        .orderBy('createdAt', descending: false)
-                        .snapshots(),
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
+            return StreamBuilder<bool>(
+              stream: _roomsService.watchIsMember(widget.roomId),
+              builder: (context, memberSnap) {
+                final isMember = memberSnap.data ?? false;
 
-                      if (snapshot.hasError) {
-                        return const Center(child: Text('Error cargando mensajes'));
-                      }
+                return Column(
+                  children: [
+                    // ---------------- HEADER (3 filas) ----------------
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                      child: Column(
+                        children: [
+                          // Fila 1
+                          Row(
+                            children: [
+                              IconButton(
+                                onPressed: () => Navigator.pop(context),
+                                icon: const Icon(Icons.arrow_back, color: Colors.white),
+                              ),
+                              const SizedBox(width: 6),
+                              const CircleAvatar(
+                                radius: 18,
+                                backgroundColor: Color(0xFF1C1C26),
+                                child: Icon(Icons.image_outlined, color: Colors.white70),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      roomName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      ownerLine,
+                                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: () => _openInfoSheet(isMember: isMember),
+                                icon: const Icon(Icons.info_outline, color: Colors.white),
+                              ),
+                            ],
+                          ),
 
-                      final docs = snapshot.data?.docs ?? [];
-                      if (docs.isEmpty) {
-                        return const Center(child: Text('No hay mensajes'));
-                      }
+                          const SizedBox(height: 10),
 
-                      final messages = docs.map((d) => Message.fromFirestore(d)).toList();
+                          // Fila 2: Noticias izq + Miembros dcha
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Container(
+                                  height: 44,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF12121A),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(12),
+                                    onTap: () {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(content: Text('Noticias: pendiente')),
+                                      );
+                                    },
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.campaign_outlined, color: Colors.white70),
+                                          const SizedBox(width: 10),
+                                          const Expanded(
+                                            child: Text(
+                                              'Noticias',
+                                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                                            ),
+                                          ),
+                                          const Icon(Icons.chevron_right, color: Colors.white54),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
 
-                      // Prefetch perfiles (solo mensajes user con authorId)
-                      final authorIds = messages
-                          .where((m) => m.type == MessageType.user)
-                          .map((m) => m.authorId ?? '')
-                          .where((id) => id.isNotEmpty)
-                          .toSet();
+                              // Miembros: iconos pisados + contador (sin marco alrededor)
+                              StreamBuilder<int>(
+                                stream: _roomsService.watchMembersPreviewCount(widget.roomId, limit: 3),
+                                builder: (context, prevSnap) {
+                                  final iconsCount = prevSnap.data ?? 0;
+                                  final membersCount = room?.membersCount ?? 0;
 
-                      _ensureProfilesLoaded(authorIds);
+                                  return Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _membersPreviewCount(iconsCount),
+                                      Text(
+                                        '$membersCount',
+                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
 
-                      final items = _buildItemsWithSeparators(messages);
+                          const SizedBox(height: 10),
 
-                      return ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                        itemCount: items.length,
-                        itemBuilder: (context, index) {
-                          final item = items[index];
+                          // Fila 3: Roleplay selector (placeholder)
+                          Container(
+                            height: 46,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF12121A),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.shield_outlined, color: Colors.white70),
+                                  const SizedBox(width: 10),
+                                  const Expanded(
+                                    child: Text(
+                                      'Roleplay',
+                                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                  const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
 
-                          if (item.kind == _ChatItemKind.separator) {
-                            return _buildTimeSeparator(item.separatorText!);
+                    const Divider(height: 1, color: Color(0xFF1A1A22)),
+
+                    // ---------------- MENSAJES ----------------
+                    Expanded(
+                      child: StreamBuilder<List<MessageModel>>(
+                        stream: _messageService.watchMessages(widget.roomId),
+                        builder: (context, msgSnap) {
+                          if (msgSnap.hasError) {
+                            return Center(
+                              child: Text('Error: ${msgSnap.error}', style: const TextStyle(color: Colors.white70)),
+                            );
+                          }
+                          if (!msgSnap.hasData) {
+                            return const Center(child: CircularProgressIndicator());
                           }
 
-                          final msg = item.message!;
-                          if (msg.type == MessageType.system) {
-                            return _buildSystemMessage(msg.content);
-                          }
+                          final msgs = msgSnap.data!;
+                          final items = <_ChatItem>[];
 
-                          final authorId = msg.authorId ?? '';
-                          final isMine = authorId == user.uid;
-
-                          final profile = _profileCache[authorId];
-                          final displayName = profile?.displayName ?? 'Usuario';
-
-                          // Para agrupar por usuario: header solo si cambia de autor o venimos de system/separator
-                          bool showHeader = true;
-                          if (index > 0) {
-                            final prev = items[index - 1];
-                            if (prev.kind == _ChatItemKind.message) {
-                              final prevMsg = prev.message!;
-                              if (prevMsg.type == MessageType.user &&
-                                  prevMsg.authorId == authorId) {
-                                showHeader = false;
+                          DateTime? prev;
+                          for (final m in msgs) {
+                            if (prev != null) {
+                              final gapMin = m.createdAt.difference(prev!).inMinutes;
+                              if (gapMin >= 180) {
+                                items.add(_ChatItem.separator(_formatGapSeparator(m.createdAt)));
                               }
                             }
+                            items.add(_ChatItem.message(m));
+                            prev = m.createdAt;
                           }
 
-                          return _buildChatBubble(
-                            isMine: isMine,
-                            displayName: displayName,
-                            text: msg.content,
-                            showHeader: showHeader,
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (_scrollCtrl.hasClients) {
+                              _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+                            }
+                          });
+
+                          return ListView.builder(
+                            controller: _scrollCtrl,
+                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                            itemCount: items.length,
+                            itemBuilder: (context, i) {
+                              final item = items[i];
+
+                              if (item.isSeparator) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  child: Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.35),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        item.separatorText!,
+                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+
+                              final m = item.message!;
+                              if (m.isSystem) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  child: Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.35),
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Text(
+                                        m.text,
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+
+                              final isMe = m.authorId == _uid;
+                              final displayName = (m.authorDisplayName?.trim().isNotEmpty ?? false)
+                                  ? m.authorDisplayName!.trim()
+                                  : 'Usuario';
+
+                              // Agrupación: si el anterior es del mismo autor, no repetimos header
+                              bool showHeader = true;
+                              if (i > 0) {
+                                final prevItem = items[i - 1];
+                                if (!prevItem.isSeparator &&
+                                    prevItem.message != null &&
+                                    !prevItem.message!.isSystem &&
+                                    prevItem.message!.authorId == m.authorId) {
+                                  showHeader = false;
+                                }
+                              }
+
+                              final bubble = Container(
+                                constraints: const BoxConstraints(maxWidth: 280),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1C1C26),
+                                  borderRadius: BorderRadius.circular(10), // más parecido a ProjectZ
+                                  border: Border.all(color: Colors.white10),
+                                ),
+                                child: Text(
+                                  m.text,
+                                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                                ),
+                              );
+
+                              final avatar = CircleAvatar(
+                                radius: 16,
+                                backgroundColor: const Color(0xFF1C1C26),
+                                child: Icon(Icons.person, color: Colors.white.withOpacity(0.85)),
+                              );
+
+                              if (isMe) {
+                                return Padding(
+                                  padding: EdgeInsets.only(top: showHeader ? 10 : 4, bottom: 4),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Flexible(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.end,
+                                          children: [
+                                            if (showHeader)
+                                              Padding(
+                                                padding: const EdgeInsets.only(right: 6, bottom: 4),
+                                                child: Text(
+                                                  displayName,
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 13,
+                                                  ),
+                                                ),
+                                              ),
+                                            bubble,
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      if (showHeader) avatar else const SizedBox(width: 32),
+                                    ],
+                                  ),
+                                );
+                              } else {
+                                return Padding(
+                                  padding: EdgeInsets.only(top: showHeader ? 10 : 4, bottom: 4),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (showHeader) avatar else const SizedBox(width: 32),
+                                      const SizedBox(width: 8),
+                                      Flexible(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            if (showHeader)
+                                              Padding(
+                                                padding: const EdgeInsets.only(left: 6, bottom: 4),
+                                                child: Text(
+                                                  displayName,
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 13,
+                                                  ),
+                                                ),
+                                              ),
+                                            bubble,
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }
+                            },
                           );
                         },
-                      );
-                    },
-                  ),
-                ),
+                      ),
+                    ),
 
-                _buildComposer(isMember: isMember),
-              ],
+                    // ---------------- BARRA “UNIRSE” si no es miembro ----------------
+                    if (!isMember)
+                      Container(
+                        margin: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF12121A),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.lock_outline, color: Colors.white70),
+                            const SizedBox(width: 10),
+                            const Expanded(
+                              child: Text(
+                                'Eres espectador. Únete para poder escribir.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton(
+                              onPressed: _loadingProfile ? null : () async => _joinRoom(),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF2A2A3A),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              ),
+                              child: const Text('Unirse'),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    // ---------------- INPUT + ICONOS (placeholder futuro) ----------------
+                    Container(
+                      color: const Color(0xFF0B0B0F),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 18,
+                                backgroundColor: const Color(0xFF1C1C26),
+                                child: Icon(Icons.person, color: Colors.white.withOpacity(0.85)),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF12121A),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: TextField(
+                                    controller: _textCtrl,
+                                    enabled: isMember,
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: InputDecoration(
+                                      hintText: 'Escribe tu mensaje...',
+                                      hintStyle: const TextStyle(color: Colors.white38),
+                                      border: InputBorder.none,
+                                      suffixIcon: Padding(
+                                        padding: const EdgeInsets.only(right: 6),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFF1C1C26),
+                                                borderRadius: BorderRadius.circular(10),
+                                                border: Border.all(color: Colors.white10),
+                                              ),
+                                              child: const Text('A+', style: TextStyle(color: Colors.white70)),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            IconButton(
+                                              onPressed: () => _sendMessage(isMember),
+                                              icon: const Icon(Icons.send, color: Colors.white70),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    onSubmitted: (_) => _sendMessage(isMember),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          // Fila de iconos reservada (placeholder futuro)
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: const [
+                              Icon(Icons.graphic_eq, color: Colors.white54),
+                              Icon(Icons.image_outlined, color: Colors.white54),
+                              Icon(Icons.emoji_emotions_outlined, color: Colors.white54),
+                              Icon(Icons.auto_awesome_outlined, color: Colors.white54),
+                              Icon(Icons.casino_outlined, color: Colors.white54),
+                              Icon(Icons.add, color: Colors.white54),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
             );
           },
         ),
       ),
     );
   }
-}
-
-class _BottomIcon extends StatelessWidget {
-  final IconData icon;
-  const _BottomIcon(this.icon);
-
-  @override
-  Widget build(BuildContext context) {
-    return Icon(icon, color: Colors.white70, size: 22);
-  }
-}
-
-class _MembersMini extends StatelessWidget {
-  final String roomId;
-  final int membersCount;
-
-  const _MembersMini({
-    required this.roomId,
-    required this.membersCount,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final membersRef = FirebaseFirestore.instance
-        .collection('rooms')
-        .doc(roomId)
-        .collection('members');
-
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: membersRef.orderBy('joinedAt', descending: true).limit(4).snapshots(),
-      builder: (context, snapshot) {
-        final docs = snapshot.data?.docs ?? [];
-        final avatarsToShow = docs.length.clamp(0, 4);
-
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 18.0 * (avatarsToShow == 0 ? 1 : avatarsToShow) + 10,
-              height: 28,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: List.generate(avatarsToShow, (i) {
-                  return Positioned(
-                    left: i * 18.0,
-                    child: CircleAvatar(
-                      radius: 12,
-                      backgroundColor: Colors.white12,
-                      child: const Icon(Icons.person, size: 14, color: Colors.white70),
-                    ),
-                  );
-                }),
-              ),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              '$membersCount',
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _PublicProfile {
-  final String displayName;
-  final String username;
-  const _PublicProfile({required this.displayName, required this.username});
-}
-
-enum _ChatItemKind { message, separator }
-
-class _ChatItem {
-  final _ChatItemKind kind;
-  final Message? message;
-  final String? separatorText;
-
-  const _ChatItem._(this.kind, {this.message, this.separatorText});
-
-  factory _ChatItem.message(Message msg) => _ChatItem._(_ChatItemKind.message, message: msg);
-
-  factory _ChatItem.separator(String text) =>
-      _ChatItem._(_ChatItemKind.separator, separatorText: text);
 }
