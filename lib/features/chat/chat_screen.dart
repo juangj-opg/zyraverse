@@ -31,11 +31,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
 
-    // Importante: asegura tu perfil público si falta o está incompleto
     _ensureMyPublicProfile();
   }
 
@@ -56,38 +54,37 @@ class _ChatScreenState extends State<ChatScreen> {
     final uid = user.uid;
 
     try {
-      // Leemos tu doc privado (siempre permitido para ti)
-      final userSnap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final userSnap =
+          await FirebaseFirestore.instance.collection('users').doc(uid).get();
       final data = userSnap.data();
       if (data == null) return;
 
       final username = (data['username'] as String?)?.trim() ?? '';
       final displayName = (data['displayName'] as String?)?.trim() ?? '';
 
-      // Si aún no está completo, no hacemos nada (no eres "válido" todavía)
+      // si no está completo, no tocamos nada
       if (username.isEmpty || displayName.isEmpty) return;
 
-      // Creamos/actualizamos tu perfil público
+      // ✅ Creamos/actualizamos perfil público SIN photoURL (y borramos si existía)
       await FirebaseFirestore.instance.collection('profiles').doc(uid).set(
         {
           'username': username,
           'displayName': displayName,
-          'photoURL': user.photoURL,
           'updatedAt': FieldValue.serverTimestamp(),
+          'photoURL': FieldValue.delete(),
         },
         SetOptions(merge: true),
       );
 
-      // Cache directo para que no salga "Usuario"
-      final p = PublicProfile(
+      // Cache para que no salga "Usuario"
+      _profileCache[uid] = PublicProfile(
         uid: uid,
         username: username,
         displayName: displayName,
-        photoURL: user.photoURL,
+        photoURL: null,
       );
-      _profileCache[uid] = p;
     } catch (_) {
-      // Si falla, simplemente el UI caerá al fallback
+      // si falla, caerá al fallback "Usuario"
     }
   }
 
@@ -119,8 +116,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String _formatTime(DateTime dt) {
-    // ✅ Esto arregla el típico desfase si el DateTime viene en UTC
-    final local = dt.toLocal();
+    final local = dt.toLocal(); // ✅ evita desfases típicos
     final h = local.hour.toString().padLeft(2, '0');
     final m = local.minute.toString().padLeft(2, '0');
     return '$h:$m';
@@ -218,20 +214,14 @@ class _ChatScreenState extends State<ChatScreen> {
                       builder: (context, profSnap) {
                         final profile = profSnap.data;
 
-                        // ✅ Ahora si es tu mensaje, y aún no hay profile por lo que sea,
-                        // intentamos usar el caché (asegurado en _ensureMyPublicProfile)
-                        final effectiveProfile = (profile == null && isMine)
-                            ? _profileCache[myUid] ?? profile
-                            : profile;
-
                         final displayName =
-                            (effectiveProfile?.displayName.isNotEmpty == true)
-                                ? effectiveProfile!.displayName
+                            (profile?.displayName.isNotEmpty == true)
+                                ? profile!.displayName
                                 : 'Usuario';
 
                         final username =
-                            (effectiveProfile?.username.isNotEmpty == true)
-                                ? '@${effectiveProfile!.username}'
+                            (profile?.username.isNotEmpty == true)
+                                ? '@${profile!.username}'
                                 : '';
 
                         final timeText = msg.createdAt.millisecondsSinceEpoch == 0
@@ -242,7 +232,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           isMine: isMine,
                           displayName: displayName,
                           username: username,
-                          photoURL: effectiveProfile?.photoURL,
                           content: msg.content,
                           timeText: timeText,
                         );
@@ -283,7 +272,6 @@ class _MessageTile extends StatelessWidget {
   final bool isMine;
   final String displayName;
   final String username;
-  final String? photoURL;
   final String content;
   final String timeText;
 
@@ -291,7 +279,6 @@ class _MessageTile extends StatelessWidget {
     required this.isMine,
     required this.displayName,
     required this.username,
-    required this.photoURL,
     required this.content,
     required this.timeText,
   });
@@ -305,14 +292,15 @@ class _MessageTile extends StatelessWidget {
     final align = isMine ? Alignment.centerRight : Alignment.centerLeft;
     final cross = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
+    // ✅ Avatar estilo “placeholder” (sin foto de Google)
     final avatar = CircleAvatar(
       radius: 18,
-      backgroundImage: (photoURL != null && photoURL!.isNotEmpty)
-          ? NetworkImage(photoURL!)
-          : null,
-      child: (photoURL == null || photoURL!.isEmpty)
-          ? const Icon(Icons.person, size: 18)
-          : null,
+      backgroundColor: Colors.white.withOpacity(0.08),
+      child: Icon(
+        Icons.person,
+        size: 18,
+        color: Colors.white.withOpacity(0.85),
+      ),
     );
 
     return Padding(

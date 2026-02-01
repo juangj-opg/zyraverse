@@ -59,14 +59,12 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
         _lockedUsername = u;
       }
 
-      // displayName puede venir vacío si el usuario es inválido: lo dejamos tal cual
       if (d != null) _displayNameController.text = d;
-
       if (b != null && b.isNotEmpty) _bioController.text = b;
 
       if (mounted) setState(() {});
     } catch (_) {
-      // si falla el prefill no pasa nada
+      // si falla el prefill, no pasa nada
     }
   }
 
@@ -119,7 +117,8 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
           });
         }
 
-        // 2) Guardar perfil privado en users/{uid} (isValid = true)
+        // 2) users/{uid} (perfil privado)
+        // ✅ Nota: borramos cualquier photoURL anterior para que NO se use nunca
         tx.set(
           userRef,
           {
@@ -128,20 +127,20 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
             'bio': bio,
             'isValid': true,
             'validatedAt': FieldValue.serverTimestamp(),
-            // mantenemos foto/email en users (si existen) pero aquí no tocamos email
-            'photoURL': user.photoURL,
+            'photoURL': FieldValue.delete(),
           },
           SetOptions(merge: true),
         );
 
-        // 3) Guardar perfil público en profiles/{uid} (para pintar autores en chat)
+        // 3) profiles/{uid} (perfil público para autores en chat)
+        // ✅ Igual: borramos photoURL para que el avatar sea siempre genérico
         tx.set(
           profileRef,
           {
             'username': username,
             'displayName': displayName,
-            'photoURL': user.photoURL,
             'updatedAt': FieldValue.serverTimestamp(),
+            'photoURL': FieldValue.delete(),
           },
           SetOptions(merge: true),
         );
@@ -149,7 +148,6 @@ class _CreateProfileScreenState extends State<CreateProfileScreen> {
 
       if (!mounted) return;
 
-      // Volver al gate principal (AppEntry) para que redirija a salas si ya eres válido
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const AppEntry()),
         (route) => false,
