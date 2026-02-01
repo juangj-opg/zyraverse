@@ -1,8 +1,9 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 
-import '../../core/models/public_profile.dart';
 import '../rooms/room_model.dart';
 import 'message_model.dart';
 
@@ -16,357 +17,262 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const Duration _timeGapForSeparator = Duration(hours: 3);
+
   final TextEditingController _controller = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
 
   late final DocumentReference<Map<String, dynamic>> _roomRef;
   late final CollectionReference<Map<String, dynamic>> _messagesRef;
+  late final CollectionReference<Map<String, dynamic>> _membersRef;
 
-  final Map<String, PublicProfile?> _profileCache = {};
-  final Map<String, Future<PublicProfile?>> _profileFutureCache = {};
+  final Map<String, _PublicProfile> _profileCache = {};
+  final Set<String> _loadingProfiles = {};
 
-  int _lastMessageCount = 0;
-  bool _myProfileEnsured = false;
+  StreamSubscription? _roomSub;
 
-  // --- UI tuning (ProjectZ-ish) ---
-  static const double _avatarSize = 36;
-  static const double _avatarGap = 10;
-
-  // Más “cuadrado” como ProjectZ
-  static const double _bubbleRadius = 8;
-
-  // Footer sizes (reservados para futuro)
-  static const double _footerInputHeight = 46;
-  static const double _footerIconRowHeight = 44;
-
-  // Placeholder members
-  static const int _membersCountPlaceholder = 24;
+  int _membersCountLive = 0;
 
   @override
   void initState() {
     super.initState();
+
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
-    _ensureMyPublicProfile();
-  }
+    _membersRef = _roomRef.collection('members');
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  // Garantiza que el perfil público exista y NO tenga photoURL (avatar placeholder)
-  Future<void> _ensureMyPublicProfile() async {
-    if (_myProfileEnsured) return;
-    _myProfileEnsured = true;
-
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    final uid = user.uid;
-
-    try {
-      final userSnap =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final data = userSnap.data();
+    // membersCount “real” desde el doc de la room (MVP)
+    _roomSub = _roomRef.snapshots().listen((snap) {
+      final data = snap.data();
       if (data == null) return;
+      final raw = data['membersCount'];
+      final count = raw is int ? raw : (raw is num ? raw.toInt() : 0);
 
-      final username = (data['username'] as String?)?.trim() ?? '';
-      final displayName = (data['displayName'] as String?)?.trim() ?? '';
-
-      if (username.isEmpty || displayName.isEmpty) return;
-
-      await FirebaseFirestore.instance.collection('profiles').doc(uid).set(
-        {
-          'username': username,
-          'displayName': displayName,
-          'updatedAt': FieldValue.serverTimestamp(),
-          // Por decisión tuya: NO usar foto de Google por defecto
-          'photoURL': FieldValue.delete(),
-        },
-        SetOptions(merge: true),
-      );
-
-      _profileCache[uid] = PublicProfile(
-        uid: uid,
-        username: username,
-        displayName: displayName,
-        photoURL: null,
-      );
-    } catch (_) {
-      // silencioso
-    }
-  }
-
-  Future<PublicProfile?> _loadProfile(String uid) {
-    if (_profileCache.containsKey(uid)) {
-      return Future.value(_profileCache[uid]);
-    }
-
-    return _profileFutureCache.putIfAbsent(uid, () async {
-      try {
-        final doc = await FirebaseFirestore.instance
-            .collection('profiles')
-            .doc(uid)
-            .get();
-
-        if (!doc.exists) {
-          _profileCache[uid] = null;
-          return null;
-        }
-
-        final p = PublicProfile.fromDoc(doc);
-        _profileCache[uid] = p;
-        return p;
-      } catch (_) {
-        _profileCache[uid] = null;
-        return null;
+      if (mounted) {
+        setState(() => _membersCountLive = count);
       }
     });
   }
 
-  void _autoScrollIfNeeded(int newCount) {
-    if (newCount <= _lastMessageCount) return;
-    _lastMessageCount = newCount;
+  @override
+  void dispose() {
+    _roomSub?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
-    });
+  User? get _currentUser => FirebaseAuth.instance.currentUser;
+
+  DocumentReference<Map<String, dynamic>>? _myMemberRef() {
+    final user = _currentUser;
+    if (user == null) return null;
+    return _membersRef.doc(user.uid);
+  }
+
+  Future<_PublicProfile> _getMyProfile() async {
+    final user = _currentUser;
+    if (user == null) {
+      return const _PublicProfile(displayName: 'Usuario', username: '');
+    }
+
+    final uid = user.uid;
+    if (_profileCache.containsKey(uid)) return _profileCache[uid]!;
+
+    final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+    final data = snap.data() ?? {};
+
+    final p = _PublicProfile(
+      displayName: (data['displayName'] as String?)?.trim().isNotEmpty == true
+          ? (data['displayName'] as String).trim()
+          : 'Usuario',
+      username: (data['username'] as String?)?.trim() ?? '',
+    );
+
+    _profileCache[uid] = p;
+    return p;
+  }
+
+  Future<void> _ensureProfilesLoaded(Iterable<String> uids) async {
+    final toLoad = uids
+        .where((id) => id.trim().isNotEmpty)
+        .where((id) => !_profileCache.containsKey(id))
+        .where((id) => !_loadingProfiles.contains(id))
+        .toList();
+
+    if (toLoad.isEmpty) return;
+
+    for (final uid in toLoad) {
+      _loadingProfiles.add(uid);
+      unawaited(() async {
+        try {
+          final snap =
+              await FirebaseFirestore.instance.collection('users').doc(uid).get();
+          final data = snap.data() ?? {};
+          final p = _PublicProfile(
+            displayName: (data['displayName'] as String?)?.trim().isNotEmpty == true
+                ? (data['displayName'] as String).trim()
+                : 'Usuario',
+            username: (data['username'] as String?)?.trim() ?? '',
+          );
+          _profileCache[uid] = p;
+        } finally {
+          _loadingProfiles.remove(uid);
+          if (mounted) setState(() {});
+        }
+      }());
+    }
   }
 
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _currentUser;
     if (user == null) return;
 
     _controller.clear();
 
-    final preview = text.length > 80 ? '${text.substring(0, 80)}…' : text;
-
-    final batch = FirebaseFirestore.instance.batch();
-    final messageDoc = _messagesRef.doc();
-
-    batch.set(messageDoc, {
+    await _messagesRef.add({
+      'type': 'user',
       'authorId': user.uid,
       'content': text,
       'createdAt': FieldValue.serverTimestamp(),
     });
-
-    batch.set(
-      _roomRef,
-      {
-        'lastMessagePreview': preview,
-        'lastMessageAt': FieldValue.serverTimestamp(),
-        'sortAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
-
-    await batch.commit();
   }
 
-  // -----------------------
-  // UI helpers
-  // -----------------------
+  Future<void> _sendSystem(String text) async {
+    await _messagesRef.add({
+      'type': 'system',
+      'content': text,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
 
-  Widget _avatarPlaceholder({bool visible = true}) {
-    if (!visible) {
-      return const SizedBox(width: _avatarSize, height: _avatarSize);
+  Future<void> _joinAsMember() async {
+    final user = _currentUser;
+    final myMemberRef = _myMemberRef();
+    if (user == null || myMemberRef == null) return;
+
+    final profile = await _getMyProfile();
+
+    // 1) Crear member + incrementar contador (transaction)
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final memberSnap = await tx.get(myMemberRef);
+      if (memberSnap.exists) return;
+
+      tx.set(myMemberRef, {
+        'uid': user.uid,
+        'role': 'member',
+        'joinedAt': FieldValue.serverTimestamp(),
+        'displayNameSnapshot': profile.displayName,
+      });
+
+      tx.set(_roomRef, {
+        'membersCount': FieldValue.increment(1),
+      }, SetOptions(merge: true));
+    });
+
+    // 2) Mensaje system (ya eres miembro, y rules lo permitirán)
+    await _sendSystem('${profile.displayName} se ha unido a esta Fiesta.');
+  }
+
+  Future<void> _leaveAsMember() async {
+    final user = _currentUser;
+    final myMemberRef = _myMemberRef();
+    if (user == null || myMemberRef == null) return;
+
+    final profile = await _getMyProfile();
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final memberSnap = await tx.get(myMemberRef);
+      if (!memberSnap.exists) return;
+
+      tx.delete(myMemberRef);
+
+      // Evitar negativos (MVP): si no existe el campo, asumimos 0
+      final roomSnap = await tx.get(_roomRef);
+      final data = roomSnap.data() ?? {};
+      final raw = data['membersCount'];
+      final current = raw is int ? raw : (raw is num ? raw.toInt() : 0);
+      final next = (current - 1) < 0 ? 0 : (current - 1);
+
+      tx.set(_roomRef, {
+        'membersCount': next,
+      }, SetOptions(merge: true));
+    });
+
+    await _sendSystem('${profile.displayName} ha abandonado esta Fiesta.');
+  }
+
+  String _two(int v) => v < 10 ? '0$v' : '$v';
+
+  String _formatSeparator(DateTime dt) {
+    final months = const [
+      'ene',
+      'feb',
+      'mar',
+      'abr',
+      'may',
+      'jun',
+      'jul',
+      'ago',
+      'sept',
+      'oct',
+      'nov',
+      'dic',
+    ];
+
+    final m = months[dt.month - 1];
+    return '${dt.day} $m ${dt.year}, ${_two(dt.hour)}:${_two(dt.minute)}';
+  }
+
+  bool _isDifferentDay(DateTime a, DateTime b) {
+    return a.year != b.year || a.month != b.month || a.day != b.day;
+  }
+
+  List<_ChatItem> _buildItemsWithSeparators(List<Message> messages) {
+    final items = <_ChatItem>[];
+    Message? prev;
+
+    for (final msg in messages) {
+      if (prev != null) {
+        final changedDay = _isDifferentDay(prev!.createdAt, msg.createdAt);
+        final gap = msg.createdAt.difference(prev!.createdAt);
+
+        if (changedDay || gap >= _timeGapForSeparator) {
+          items.add(_ChatItem.separator(_formatSeparator(msg.createdAt)));
+        }
+      }
+
+      items.add(_ChatItem.message(msg));
+      prev = msg;
     }
 
-    return CircleAvatar(
-      radius: _avatarSize / 2,
-      backgroundColor: Colors.white.withOpacity(0.08),
-      child: Icon(
-        Icons.person,
-        size: 18,
-        color: Colors.white.withOpacity(0.85),
-      ),
-    );
+    return items;
   }
 
-  // Avatar pequeño para “miembros” (SIN contenedor/borde alrededor del bloque)
-  Widget _memberAvatarCircle({double size = 22}) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.white.withOpacity(0.10),
-        // Esto NO es un borde del bloque de miembros; es solo para separar círculos al solaparse
-        border: Border.all(
-          color: Colors.black.withOpacity(0.35),
-          width: 1.5,
-        ),
-      ),
-      child: Icon(
-        Icons.person,
-        size: size * 0.60,
-        color: Colors.white.withOpacity(0.85),
-      ),
-    );
-  }
-
-  // Miembros al estilo ProjectZ: avatares pisándose + contador, SIN “chip” alrededor
-  Widget _membersInline() {
-    const double size = 22;
-    const double overlap = 8; // cuanto más alto, más se pisan
-    const int shown = 3; // 3-4 según quieras (en ProjectZ suelen verse 3)
-
-    final double step = size - overlap;
-    final double stackWidth = size + (shown - 1) * step;
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: stackWidth,
-          height: size,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: List.generate(shown, (i) {
-              return Positioned(
-                left: i * step,
-                child: _memberAvatarCircle(size: size),
-              );
-            }),
-          ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          '$_membersCountPlaceholder',
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-            color: Colors.white.withOpacity(0.85),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // Placeholder “imagen de sala”
-  Widget _roomImagePlaceholder() {
-    return Container(
-      width: 42,
-      height: 42,
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withOpacity(0.10)),
-      ),
-      child: Icon(Icons.image_outlined,
-          size: 18, color: Colors.white.withOpacity(0.85)),
-    );
-  }
-
-  // Selector de personaje/usuario (placeholder por ahora)
-  Widget _characterSlotButton() {
-    return InkWell(
-      borderRadius: BorderRadius.circular(999),
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Selector de personaje (próximamente)')),
-        );
-      },
-      child: Container(
-        width: _footerInputHeight,
-        height: _footerInputHeight,
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.06),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: Colors.white.withOpacity(0.10)),
-        ),
-        child: Center(
-          child: Icon(
-            Icons.person,
-            size: 20,
-            color: Colors.white.withOpacity(0.85),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _aPlusButton() {
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Opciones de texto (A+) (próximamente)')),
-        );
-      },
-      child: Container(
-        width: 42,
-        height: 36,
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.06),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.white.withOpacity(0.10)),
-        ),
-        child: Center(
-          child: Text(
-            'A+',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              color: Colors.white.withOpacity(0.85),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _iconBarButton(IconData icon, String label) {
-    return IconButton(
-      tooltip: label,
-      onPressed: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$label (próximamente)')),
-        );
-      },
-      icon: Icon(icon, color: Colors.white.withOpacity(0.85)),
-    );
-  }
-
-  BoxDecoration _chipDecoration() {
-    return BoxDecoration(
-      color: Colors.black.withOpacity(0.14),
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: Colors.white.withOpacity(0.08)),
-    );
-  }
-
-  // ===========================
-  // CABECERA: 3 FILAS (ProjectZ)
-  // ===========================
-  Widget _projectZHeader() {
+  Widget _buildRoomHeader({
+    required bool isMember,
+  }) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Column(
         children: [
-          // FILA 1: Back + Img sala + Nombre (owner debajo) + Info
+          // FILA 1: back + img sala + nombre + owner + info
           Row(
             children: [
-              InkWell(
-                borderRadius: BorderRadius.circular(999),
-                onTap: () => Navigator.pop(context),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Icon(Icons.arrow_back,
-                      color: Colors.white.withOpacity(0.90)),
-                ),
+              IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.pop(context),
               ),
-              const SizedBox(width: 6),
-              _roomImagePlaceholder(),
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.white10,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.image_outlined, size: 20),
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -374,20 +280,19 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     Text(
                       widget.room.name,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 18,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
+                    const Text(
                       '(Owner: pendiente)',
-                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.white.withOpacity(0.65),
-                        fontWeight: FontWeight.w600,
+                        color: Colors.white60,
                       ),
                     ),
                   ],
@@ -395,19 +300,14 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               IconButton(
                 icon: const Icon(Icons.info_outline),
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Info sala (próximamente)')),
-                  );
-                },
+                onPressed: () => _openInfoSheet(isMember: isMember),
               ),
             ],
           ),
 
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
 
-          // FILA 2: DOS APARTADOS (Noticias) + (Miembros)
-          // -> Miembros SIN chip, y con avatares solapados (ProjectZ)
+          // FILA 2: Noticias (izq) + miembros (der)
           Row(
             children: [
               Expanded(
@@ -415,72 +315,60 @@ class _ChatScreenState extends State<ChatScreen> {
                   borderRadius: BorderRadius.circular(12),
                   onTap: () {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Noticias (próximamente)')),
+                      const SnackBar(content: Text('Noticias (pendiente)')),
                     );
                   },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
+                    height: 44,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    decoration: _chipDecoration(),
-                    child: Row(
+                    child: const Row(
                       children: [
-                        Icon(Icons.campaign_outlined,
-                            size: 18, color: Colors.white.withOpacity(0.88)),
-                        const SizedBox(width: 10),
+                        Icon(Icons.campaign_outlined, size: 18),
+                        SizedBox(width: 10),
                         Text(
                           'Noticias',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w800,
-                            color: Colors.white.withOpacity(0.90),
-                          ),
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                         ),
-                        const Spacer(),
-                        Icon(Icons.chevron_right,
-                            color: Colors.white.withOpacity(0.65)),
+                        Spacer(),
+                        Icon(Icons.chevron_right),
                       ],
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
-              // Miembros: SIN contenedor/borde exterior
-              _membersInline(),
+              const SizedBox(width: 10),
+              _MembersMini(
+                roomId: widget.room.id,
+                membersCount: _membersCountLive,
+              ),
             ],
           ),
 
           const SizedBox(height: 10),
 
-          // FILA 3: Roleplay selector (abrirá selector de personajes)
-          InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Selector Roleplay (próximamente)')),
-              );
-            },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: _chipDecoration(),
-              child: Row(
-                children: [
-                  Icon(Icons.shield,
-                      size: 18, color: Colors.white.withOpacity(0.88)),
-                  const SizedBox(width: 10),
-                  Text(
-                    'Roleplay',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.92),
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const Spacer(),
-                  Icon(Icons.keyboard_arrow_down,
-                      color: Colors.white.withOpacity(0.70)),
-                ],
-              ),
+          // FILA 3: Roleplay selector placeholder
+          Container(
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.shield_outlined, size: 18),
+                SizedBox(width: 10),
+                Text(
+                  'Roleplay',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                ),
+                Spacer(),
+                Icon(Icons.expand_more),
+              ],
             ),
           ),
         ],
@@ -488,36 +376,302 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final myUid = FirebaseAuth.instance.currentUser?.uid;
-
-    return Scaffold(
-      body: Stack(
-        children: [
-          // Fondo “fullscreen”
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Color(0xFF1B1B1F),
-                  Color(0xFF111114),
-                ],
-              ),
+  void _openInfoSheet({required bool isMember}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF151515),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 44,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  widget.room.name,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Sala: ${widget.room.type == RoomType.public ? 'pública' : 'grupo'} · ID: ${widget.room.id}',
+                  style: const TextStyle(color: Colors.white60),
+                ),
+                const SizedBox(height: 18),
+                if (!isMember)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await _joinAsMember();
+                      },
+                      child: const Text('Unirme a la sala'),
+                    ),
+                  )
+                else
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent.withOpacity(0.9),
+                      ),
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await _leaveAsMember();
+                      },
+                      child: const Text('Abandonar sala'),
+                    ),
+                  ),
+              ],
             ),
           ),
+        );
+      },
+    );
+  }
 
-          // Overlay oscuro
-          Container(color: Colors.black.withOpacity(0.18)),
+  Widget _buildSystemMessage(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    );
+  }
 
-          SafeArea(
-            child: Column(
+  Widget _buildTimeSeparator(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAvatarPlaceholder({double radius = 18}) {
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: Colors.white12,
+      child: Icon(Icons.person, size: radius, color: Colors.white70),
+    );
+  }
+
+  Widget _buildChatBubble({
+    required bool isMine,
+    required String displayName,
+    required String text,
+    required bool showHeader,
+  }) {
+    final bubbleColor = Colors.white10;
+    final alignment = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+
+    final bubbleRadius = BorderRadius.circular(12); // <- ya reducido, estilo ProjectZ-ish
+
+    final bubble = Container(
+      constraints: const BoxConstraints(maxWidth: 260),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        borderRadius: bubbleRadius,
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 14.5),
+      ),
+    );
+
+    if (!showHeader) {
+      return Column(
+        crossAxisAlignment: alignment,
+        children: [
+          bubble,
+          const SizedBox(height: 8),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: alignment,
+      children: [
+        Row(
+          mainAxisAlignment: isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (!isMine) ...[
+              _buildAvatarPlaceholder(radius: 18),
+              const SizedBox(width: 10),
+              Text(
+                displayName,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ] else ...[
+              Text(
+                displayName,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(width: 10),
+              _buildAvatarPlaceholder(radius: 18),
+            ],
+          ],
+        ),
+        const SizedBox(height: 6),
+        bubble,
+        const SizedBox(height: 10),
+      ],
+    );
+  }
+
+  Widget _buildComposer({required bool isMember}) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.2),
+          border: const Border(
+            top: BorderSide(color: Colors.white10),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // fila input
+            Row(
               children: [
-                _projectZHeader(),
+                // Placeholder futuro selector personaje/usuario
+                CircleAvatar(
+                  radius: 18,
+                  backgroundColor: Colors.white12,
+                  child: const Icon(Icons.person, color: Colors.white70),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    enabled: isMember,
+                    decoration: InputDecoration(
+                      hintText: isMember
+                          ? 'Escribe tu mensaje...'
+                          : 'Únete a la sala para hablar...',
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white10,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: IconButton(
+                    icon: const Icon(Icons.send),
+                    onPressed: isMember
+                        ? _sendMessage
+                        : () async {
+                            // si no es miembro, abrimos join rápido
+                            await _joinAsMember();
+                          },
+                  ),
+                ),
+              ],
+            ),
 
-                // Chat
+            const SizedBox(height: 10),
+
+            // fila iconos (placeholder futuro)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: const [
+                _BottomIcon(Icons.multitrack_audio),
+                _BottomIcon(Icons.image_outlined),
+                _BottomIcon(Icons.emoji_emotions_outlined),
+                _BottomIcon(Icons.auto_awesome_outlined),
+                _BottomIcon(Icons.casino_outlined),
+                _BottomIcon(Icons.add),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = _currentUser;
+    if (user == null) {
+      return const Scaffold(
+        body: Center(child: Text('No autenticado')),
+      );
+    }
+
+    final myMemberRef = _myMemberRef()!;
+
+    return Scaffold(
+      body: SafeArea(
+        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: myMemberRef.snapshots(),
+          builder: (context, memberSnap) {
+            final isMember = memberSnap.data?.exists == true;
+
+            return Column(
+              children: [
+                _buildRoomHeader(isMember: isMember),
+                const Divider(height: 1, color: Colors.white10),
+
                 Expanded(
                   child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                     stream: _messagesRef
@@ -529,61 +683,66 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
 
                       if (snapshot.hasError) {
-                        return Center(child: Text('Error: ${snapshot.error}'));
+                        return const Center(child: Text('Error cargando mensajes'));
                       }
 
-                      if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                      final docs = snapshot.data?.docs ?? [];
+                      if (docs.isEmpty) {
                         return const Center(child: Text('No hay mensajes'));
                       }
 
-                      final messages = snapshot.data!.docs
-                          .map((doc) => Message.fromFirestore(doc))
-                          .toList();
+                      final messages = docs.map((d) => Message.fromFirestore(d)).toList();
 
-                      _autoScrollIfNeeded(messages.length);
+                      // Prefetch perfiles (solo mensajes user con authorId)
+                      final authorIds = messages
+                          .where((m) => m.type == MessageType.user)
+                          .map((m) => m.authorId ?? '')
+                          .where((id) => id.isNotEmpty)
+                          .toSet();
+
+                      _ensureProfilesLoaded(authorIds);
+
+                      final items = _buildItemsWithSeparators(messages);
 
                       return ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
-                        itemCount: messages.length,
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                        itemCount: items.length,
                         itemBuilder: (context, index) {
-                          final msg = messages[index];
+                          final item = items[index];
 
-                          final prevAuthorId =
-                              index > 0 ? messages[index - 1].authorId : null;
+                          if (item.kind == _ChatItemKind.separator) {
+                            return _buildTimeSeparator(item.separatorText!);
+                          }
 
-                          final isFirstInGroup = prevAuthorId != msg.authorId;
-                          final topPadding = isFirstInGroup ? 14.0 : 6.0;
+                          final msg = item.message!;
+                          if (msg.type == MessageType.system) {
+                            return _buildSystemMessage(msg.content);
+                          }
 
-                          final isMine =
-                              (myUid != null && msg.authorId == myUid);
+                          final authorId = msg.authorId ?? '';
+                          final isMine = authorId == user.uid;
 
-                          return Padding(
-                            padding: EdgeInsets.only(top: topPadding),
-                            child: FutureBuilder<PublicProfile?>(
-                              future: _loadProfile(msg.authorId),
-                              builder: (context, profSnap) {
-                                final profile = profSnap.data;
+                          final profile = _profileCache[authorId];
+                          final displayName = profile?.displayName ?? 'Usuario';
 
-                                final displayName =
-                                    (profile?.displayName.isNotEmpty == true)
-                                        ? profile!.displayName
-                                        : 'Usuario';
+                          // Para agrupar por usuario: header solo si cambia de autor o venimos de system/separator
+                          bool showHeader = true;
+                          if (index > 0) {
+                            final prev = items[index - 1];
+                            if (prev.kind == _ChatItemKind.message) {
+                              final prevMsg = prev.message!;
+                              if (prevMsg.type == MessageType.user &&
+                                  prevMsg.authorId == authorId) {
+                                showHeader = false;
+                              }
+                            }
+                          }
 
-                                return _ProjectZMessageRow(
-                                  isMine: isMine,
-                                  avatar: _avatarPlaceholder(
-                                      visible: isFirstInGroup),
-                                  reserveAvatarSpace: !isFirstInGroup,
-                                  avatarSize: _avatarSize,
-                                  avatarGap: _avatarGap,
-                                  showHeader: isFirstInGroup,
-                                  displayName: displayName,
-                                  content: msg.content,
-                                  bubbleRadius: _bubbleRadius,
-                                );
-                              },
-                            ),
+                          return _buildChatBubble(
+                            isMine: isMine,
+                            displayName: displayName,
+                            text: msg.content,
+                            showHeader: showHeader,
                           );
                         },
                       );
@@ -591,250 +750,97 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
 
-                // Footer estilo ProjectZ (reservado)
-                _ProjectZFooter(
-                  controller: _controller,
-                  inputHeight: _footerInputHeight,
-                  iconRowHeight: _footerIconRowHeight,
-                  characterSlot: _characterSlotButton(),
-                  aPlus: _aPlusButton(),
-                  onSend: _sendMessage,
-                  iconButtons: [
-                    _iconBarButton(Icons.graphic_eq, 'Voz'),
-                    _iconBarButton(Icons.image, 'Imagen'),
-                    _iconBarButton(Icons.emoji_emotions, 'Emoji'),
-                    _iconBarButton(Icons.auto_awesome, 'Acción'),
-                    _iconBarButton(Icons.casino, 'Dados'),
-                    _iconBarButton(Icons.add, 'Más'),
-                  ],
-                ),
+                _buildComposer(isMember: isMember),
               ],
-            ),
-          ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }
 }
 
-class _ProjectZMessageRow extends StatelessWidget {
-  final bool isMine;
-
-  final Widget avatar;
-  final bool reserveAvatarSpace;
-  final double avatarSize;
-  final double avatarGap;
-
-  final bool showHeader;
-  final String displayName;
-  final String content;
-
-  final double bubbleRadius;
-
-  const _ProjectZMessageRow({
-    required this.isMine,
-    required this.avatar,
-    required this.reserveAvatarSpace,
-    required this.avatarSize,
-    required this.avatarGap,
-    required this.showHeader,
-    required this.displayName,
-    required this.content,
-    required this.bubbleRadius,
-  });
+class _BottomIcon extends StatelessWidget {
+  final IconData icon;
+  const _BottomIcon(this.icon);
 
   @override
   Widget build(BuildContext context) {
-    final bubbleColor = Colors.white.withOpacity(0.08);
-
-    final avatarSlot = reserveAvatarSpace
-        ? SizedBox(width: avatarSize, height: avatarSize)
-        : avatar;
-
-    final bubbleDecoration = BoxDecoration(
-      color: bubbleColor,
-      borderRadius: BorderRadius.circular(bubbleRadius),
-      border: Border.all(color: Colors.white.withOpacity(0.10)),
-    );
-
-    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.72;
-
-    if (!isMine) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          avatarSlot,
-          SizedBox(width: avatarGap),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (showHeader)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Text(
-                      displayName,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    decoration: bubbleDecoration,
-                    child: Text(
-                      content,
-                      style: const TextStyle(fontSize: 15, height: 1.25),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 40),
-        ],
-      );
-    }
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(width: 40),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              if (showHeader)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Text(
-                    displayName,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                    ),
-                  ),
-                ),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: bubbleDecoration,
-                  child: Text(
-                    content,
-                    style: const TextStyle(fontSize: 15, height: 1.25),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        SizedBox(width: avatarGap),
-        avatarSlot,
-      ],
-    );
+    return Icon(icon, color: Colors.white70, size: 22);
   }
 }
 
-class _ProjectZFooter extends StatelessWidget {
-  final TextEditingController controller;
-  final double inputHeight;
-  final double iconRowHeight;
+class _MembersMini extends StatelessWidget {
+  final String roomId;
+  final int membersCount;
 
-  final Widget characterSlot;
-  final Widget aPlus;
-  final VoidCallback onSend;
-  final List<Widget> iconButtons;
-
-  const _ProjectZFooter({
-    required this.controller,
-    required this.inputHeight,
-    required this.iconRowHeight,
-    required this.characterSlot,
-    required this.aPlus,
-    required this.onSend,
-    required this.iconButtons,
+  const _MembersMini({
+    required this.roomId,
+    required this.membersCount,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-        child: Column(
+    final membersRef = FirebaseFirestore.instance
+        .collection('rooms')
+        .doc(roomId)
+        .collection('members');
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: membersRef.orderBy('joinedAt', descending: true).limit(4).snapshots(),
+      builder: (context, snapshot) {
+        final docs = snapshot.data?.docs ?? [];
+        final avatarsToShow = docs.length.clamp(0, 4);
+
+        return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                characterSlot,
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Container(
-                    height: inputHeight,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.22),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: Colors.white.withOpacity(0.10)),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: controller,
-                            decoration: const InputDecoration(
-                              hintText: 'Escribe tu mensaje...',
-                              border: InputBorder.none,
-                            ),
-                            onSubmitted: (_) => onSend(),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        aPlus,
-                        const SizedBox(width: 8),
-                        InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: onSend,
-                          child: Container(
-                            width: 44,
-                            height: 36,
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.06),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                  color: Colors.white.withOpacity(0.10)),
-                            ),
-                            child: Icon(
-                              Icons.send,
-                              color: Colors.white.withOpacity(0.85),
-                              size: 20,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
             SizedBox(
-              height: iconRowHeight,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: iconButtons,
+              width: 18.0 * (avatarsToShow == 0 ? 1 : avatarsToShow) + 10,
+              height: 28,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: List.generate(avatarsToShow, (i) {
+                  return Positioned(
+                    left: i * 18.0,
+                    child: CircleAvatar(
+                      radius: 12,
+                      backgroundColor: Colors.white12,
+                      child: const Icon(Icons.person, size: 14, color: Colors.white70),
+                    ),
+                  );
+                }),
               ),
             ),
+            const SizedBox(width: 6),
+            Text(
+              '$membersCount',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
+}
+
+class _PublicProfile {
+  final String displayName;
+  final String username;
+  const _PublicProfile({required this.displayName, required this.username});
+}
+
+enum _ChatItemKind { message, separator }
+
+class _ChatItem {
+  final _ChatItemKind kind;
+  final Message? message;
+  final String? separatorText;
+
+  const _ChatItem._(this.kind, {this.message, this.separatorText});
+
+  factory _ChatItem.message(Message msg) => _ChatItem._(_ChatItemKind.message, message: msg);
+
+  factory _ChatItem.separator(String text) =>
+      _ChatItem._(_ChatItemKind.separator, separatorText: text);
 }
