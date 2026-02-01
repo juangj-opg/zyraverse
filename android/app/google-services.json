@@ -12,7 +12,20 @@
           "package_name": "com.example.zyraverse"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "994014069765-jbsfl4ho6ek49vvl8at4hln9bk2i9cu2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.zyraverse",
+            "certificate_hash": "b382a613d8eff2fbd3fc5fbb467872b566d4f503"
+          }
+        },
+        {
+          "client_id": "994014069765-nqd32666n0me6tqaihljtnpdnpo6r6of.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDpZ8LxIVQErP7djwkp6KsHGCmw2XbjEXQ"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "994014069765-nqd32666n0me6tqaihljtnpdnpo6r6of.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
