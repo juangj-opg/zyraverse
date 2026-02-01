@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../rooms/room_model.dart';
 import 'message_model.dart';
+import '../../core/services/message_service.dart';
 
 class ChatScreen extends StatefulWidget {
   final Room room;
@@ -12,40 +13,20 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  final MessageService _messageService = MessageService();
   final TextEditingController _controller = TextEditingController();
 
-  final List<Message> _messages = [
-    Message(
-      id: '1',
-      roomId: '1',
-      authorId: 'user_1',
-      content: '*entra en la sala y mira alrededor*',
-      createdAt: DateTime.now(),
-    ),
-    Message(
-      id: '2',
-      roomId: '1',
-      authorId: 'user_2',
-      content: '— Bienvenido.',
-      createdAt: DateTime.now(),
-    ),
-  ];
-
   void _sendMessage() {
-    if (_controller.text.trim().isEmpty) return;
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
 
-    setState(() {
-      _messages.add(
-        Message(
-          id: DateTime.now().toString(),
-          roomId: widget.room.id,
-          authorId: 'debug_user',
-          content: _controller.text,
-          createdAt: DateTime.now(),
-        ),
-      );
-      _controller.clear();
-    });
+    _messageService.sendMessage(
+      roomId: widget.room.id,
+      authorId: 'debug_user',
+      content: text,
+    );
+
+    _controller.clear();
   }
 
   @override
@@ -58,14 +39,29 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           // MENSAJES
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final msg = _messages[index];
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text(msg.content),
+            child: StreamBuilder<List<Message>>(
+              stream: _messageService.streamMessages(widget.room.id),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                  return const Center(child: Text('No hay mensajes todavía'));
+                }
+
+                final messages = snapshot.data!;
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final msg = messages[index];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(msg.content),
+                    );
+                  },
                 );
               },
             ),
