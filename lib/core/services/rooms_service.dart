@@ -16,7 +16,6 @@ class RoomsService {
   }
 
   /// Mis salas (tab "Chats") basado en memberIds (arrayContains).
-  /// Esto evita problemas de collectionGroup + reglas.
   Stream<QuerySnapshot<Map<String, dynamic>>> watchMyRooms({required String uid}) {
     return _rooms.where('memberIds', arrayContains: uid).snapshots();
   }
@@ -48,7 +47,15 @@ class RoomsService {
     }, SetOptions(merge: true));
   }
 
-  /// Unirse (idempotente) + mantener memberIds y memberCount
+  /// Unirse (idempotente) en 2 pasos.
+  ///
+  /// IMPORTANTE:
+  /// - Primero creamos `rooms/{roomId}/members/{uid}`.
+  /// - Luego (best-effort) actualizamos el doc de room.
+  ///
+  /// Motivo: con reglas como las tuyas, si intentas hacer ambas escrituras
+  /// en una transacción, el `update` del room puede fallar porque todavía
+  /// NO eres miembro (la regla usa `exists(...)` en el estado previo).
   Future<void> joinRoom({
     required String roomId,
     required String uid,
@@ -56,20 +63,21 @@ class RoomsService {
     final rRef = roomRef(roomId);
     final mRef = memberRef(roomId, uid);
 
-    await _db.runTransaction((tx) async {
-      final mSnap = await tx.get(mRef);
+    // 1) Si ya existe, no hacemos nada (idempotente)
+    final mSnap = await mRef.get();
+    if (mSnap.exists) return;
 
-      // Si ya existe, no volvemos a incrementar
-      if (mSnap.exists) return;
+    // 2) Crear membership (esto es lo que habilita permisos de "miembro")
+    await mRef.set({
+      'uid': uid,
+      'role': 'member',
+      'joinedAt': FieldValue.serverTimestamp(),
+    });
 
-      tx.set(mRef, {
-        'uid': uid,
-        'role': 'member',
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
-
-      tx.set(
-        rRef,
+    // 3) Best-effort: mantener memberIds/memberCount/actividad en el room.
+    //    Si reglas lo deniegan o no hay permisos, NO rompemos el join.
+    try {
+      await rRef.set(
         {
           'memberIds': FieldValue.arrayUnion([uid]),
           'memberCount': FieldValue.increment(1),
@@ -77,6 +85,8 @@ class RoomsService {
         },
         SetOptions(merge: true),
       );
-    });
+    } catch (_) {
+      // Ignorado a propósito (MVP). El usuario ya está unido igualmente.
+    }
   }
 }

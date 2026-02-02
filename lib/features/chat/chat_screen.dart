@@ -18,6 +18,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _roomsService = RoomsService();
   final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+
+  bool _didInitialAutoScroll = false;
+  bool _stickToBottom = true;
 
   late final DocumentReference<Map<String, dynamic>> _roomRef;
   late final CollectionReference<Map<String, dynamic>> _messagesRef;
@@ -35,6 +39,46 @@ class _ChatScreenState extends State<ChatScreen> {
     _messagesStream = _messagesRef.orderBy('createdAt', descending: false).snapshots();
 
     _loadMyProfileSnapshot();
+
+    _scrollController.addListener(_handleScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_handleScroll);
+    _scrollController.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+
+    // Consideramos “pegado al fondo” cuando estamos a <= 80px del final.
+    final max = _scrollController.position.maxScrollExtent;
+    final cur = _scrollController.offset;
+    final distance = (max - cur).abs();
+
+    final nextStick = distance <= 80;
+    if (nextStick != _stickToBottom) {
+      setState(() => _stickToBottom = nextStick);
+    }
+  }
+
+  void _scrollToBottom({bool animated = false}) {
+    if (!_scrollController.hasClients) return;
+
+    final target = _scrollController.position.maxScrollExtent;
+    if (!animated) {
+      _scrollController.jumpTo(target);
+      return;
+    }
+
+    _scrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+    );
   }
 
   Future<void> _loadMyProfileSnapshot() async {
@@ -83,6 +127,13 @@ class _ChatScreenState extends State<ChatScreen> {
     }, SetOptions(merge: true));
 
     await batch.commit();
+
+    // Si el usuario no estaba scrolleando arriba, mantenemos el foco abajo.
+    if (_stickToBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(animated: true);
+      });
+    }
   }
 
   Future<void> _joinRoom() async {
@@ -94,16 +145,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final name = (_myDisplayName ?? '').trim();
     final safeName = name.isNotEmpty ? name : 'Usuario';
 
+    // Mensaje de sistema (tus reglas exigen authorId/authorDisplayName vacíos)
     await _messagesRef.add({
       'type': 'system',
+      'authorId': '',
+      'authorDisplayName': '',
       'text': '$safeName se ha unido a esta sala.',
       'createdAt': FieldValue.serverTimestamp(),
     });
-
-    await _roomRef.set(
-      {'lastActivityAt': FieldValue.serverTimestamp()},
-      SetOptions(merge: true),
-    );
   }
 
   String _formatDateSeparator(DateTime dt) {
@@ -139,13 +188,12 @@ class _ChatScreenState extends State<ChatScreen> {
       stream: _roomRef.snapshots(),
       builder: (context, roomSnap) {
         final roomData = roomSnap.data?.data() ?? {};
-
         final roomName = (roomData['name'] as String?) ?? widget.room.name;
-        final ownerText = '(Owner: pendiente)';
+        final ownerUid = roomData['ownerUid'] as String?;
 
-        final memberCount = (roomData['memberCount'] is int)
-            ? roomData['memberCount'] as int
-            : ((roomData['memberIds'] is List) ? (roomData['memberIds'] as List).length : 0);
+        final memberCountFromDoc = (roomData['memberCount'] as num?)?.toInt();
+        final memberIds = (roomData['memberIds'] as List?)?.cast<String>() ?? const <String>[];
+        final memberCount = memberCountFromDoc ?? memberIds.length;
 
         return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
           stream: (uid == null)
@@ -158,9 +206,9 @@ class _ChatScreenState extends State<ChatScreen> {
               body: SafeArea(
                 child: Column(
                   children: [
-                    // HEADER 3 FILAS (como acordamos)
+                    // HEADER (ProjectZ-like, 3 filas)
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
                       child: Column(
                         children: [
                           Row(
@@ -169,15 +217,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                 onPressed: () => Navigator.pop(context),
                                 icon: const Icon(Icons.arrow_back),
                               ),
-                              const SizedBox(width: 6),
                               Container(
-                                width: 38,
-                                height: 38,
+                                width: 40,
+                                height: 40,
                                 decoration: BoxDecoration(
                                   color: Colors.white10,
-                                  borderRadius: BorderRadius.circular(10),
+                                  borderRadius: BorderRadius.circular(12),
                                 ),
-                                child: const Icon(Icons.image_outlined, size: 20),
+                                child: const Icon(Icons.image_outlined, color: Colors.white70),
                               ),
                               const SizedBox(width: 10),
                               Expanded(
@@ -188,36 +235,27 @@ class _ChatScreenState extends State<ChatScreen> {
                                       roomName,
                                       style: const TextStyle(
                                         fontSize: 18,
-                                        fontWeight: FontWeight.w600,
+                                        fontWeight: FontWeight.w700,
                                       ),
+                                      maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
-                                      ownerText,
+                                      'Owner: ${ownerUid ?? 'pendiente'}',
                                       style: const TextStyle(
                                         fontSize: 12,
                                         color: Colors.white60,
+                                        fontWeight: FontWeight.w600,
                                       ),
-                                      overflow: TextOverflow.ellipsis,
                                     ),
                                   ],
                                 ),
                               ),
                               IconButton(
                                 onPressed: () {
-                                  showDialog(
-                                    context: context,
-                                    builder: (_) => AlertDialog(
-                                      title: const Text('Info'),
-                                      content: const Text('Pendiente de implementar.'),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () => Navigator.pop(context),
-                                          child: const Text('OK'),
-                                        ),
-                                      ],
-                                    ),
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Info: pendiente')),
                                   );
                                 },
                                 icon: const Icon(Icons.info_outline),
@@ -366,7 +404,23 @@ class _ChatScreenState extends State<ChatScreen> {
                             prevTime = m.createdAt;
                           }
 
+                          // Auto-scroll: al entrar, nos vamos al último mensaje.
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+
+                            if (!_didInitialAutoScroll) {
+                              _didInitialAutoScroll = true;
+                              _scrollToBottom(animated: false);
+                              return;
+                            }
+
+                            if (_stickToBottom) {
+                              _scrollToBottom(animated: true);
+                            }
+                          });
+
                           return ListView.builder(
+                            controller: _scrollController,
                             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                             itemCount: items.length,
                             itemBuilder: (context, index) {
