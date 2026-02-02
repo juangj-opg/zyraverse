@@ -9,21 +9,19 @@ class Room {
 
   final DateTime createdAt;
 
-  // Para el listado estilo ProjectZ
   final String? lastMessageText;
   final DateTime? lastActivityAt;
 
-  // Para header del chat (miembros)
-  final int? memberCount;
+  final int memberCount;
 
   const Room({
     required this.id,
     required this.name,
     required this.type,
     required this.createdAt,
+    required this.memberCount,
     this.lastMessageText,
     this.lastActivityAt,
-    this.memberCount,
   });
 
   factory Room.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
@@ -32,20 +30,18 @@ class Room {
     final createdAtRaw = data['createdAt'];
     final lastActivityRaw = data['lastActivityAt'];
 
+    final memberCount = (data['memberCount'] is int) ? data['memberCount'] as int : 0;
+
     return Room(
       id: doc.id,
       name: (data['name'] as String?) ?? 'Sala',
       type: ((data['type'] as String?) ?? 'public') == 'private'
           ? RoomType.private
           : RoomType.public,
-      createdAt: createdAtRaw is Timestamp
-          ? createdAtRaw.toDate()
-          : DateTime.fromMillisecondsSinceEpoch(0),
+      createdAt: createdAtRaw is Timestamp ? createdAtRaw.toDate() : DateTime.now(),
       lastMessageText: data['lastMessageText'] as String?,
-      lastActivityAt: lastActivityRaw is Timestamp
-          ? lastActivityRaw.toDate()
-          : null,
-      memberCount: (data['memberCount'] is int) ? data['memberCount'] as int : null,
+      lastActivityAt: lastActivityRaw is Timestamp ? lastActivityRaw.toDate() : null,
+      memberCount: memberCount,
     );
   }
 }

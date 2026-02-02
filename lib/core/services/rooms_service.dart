@@ -10,61 +10,18 @@ class RoomsService {
   DocumentReference<Map<String, dynamic>> memberRef(String roomId, String uid) =>
       _rooms.doc(roomId).collection('members').doc(uid);
 
-  /// Stream de salas ordenadas por última actividad (sin índices raros)
-  Stream<QuerySnapshot<Map<String, dynamic>>> watchRooms() {
-    return _rooms.orderBy('lastActivityAt', descending: true).snapshots();
-  }
-
-  /// Stream de salas públicas.
-  ///
-  /// Nota: evitamos mezclar `where(type==public)` con `orderBy(lastActivityAt)`
-  /// para no forzar índices compuestos en desarrollo.
+  /// Salas públicas (Discover / Chats activos)
   Stream<QuerySnapshot<Map<String, dynamic>>> watchPublicRooms() {
     return _rooms.where('type', isEqualTo: 'public').snapshots();
   }
 
-  /// Stream de los IDs de salas donde el usuario es miembro.
-  ///
-  /// Usamos `collectionGroup('members')` porque la membresía cuelga de cada sala:
-  /// rooms/{roomId}/members/{uid}
-  ///
-  /// Nota: aquí asumimos que el docId del miembro es el UID del usuario.
-  Stream<List<String>> watchMyRoomIds({required String uid}) {
-    return _db
-        .collectionGroup('members')
-        .where(FieldPath.documentId, isEqualTo: uid)
-        .snapshots()
-        .map((snap) {
-      final ids = <String>[];
-      for (final d in snap.docs) {
-        final roomRef = d.reference.parent.parent;
-        if (roomRef != null) ids.add(roomRef.id);
-      }
-      return ids;
-    });
+  /// Mis salas (tab "Chats") basado en memberIds (arrayContains).
+  /// Esto evita problemas de collectionGroup + reglas.
+  Stream<QuerySnapshot<Map<String, dynamic>>> watchMyRooms({required String uid}) {
+    return _rooms.where('memberIds', arrayContains: uid).snapshots();
   }
 
-  /// Crea/asegura salas por defecto (prototipo)
-  Future<void> ensureDefaultRooms({required String seededByUid}) async {
-    final now = FieldValue.serverTimestamp();
-
-    // Sala 1: TOA (tu ejemplo)
-    final room1 = _rooms.doc('1');
-    await room1.set({
-      'name': 'TOA',
-      'type': 'public',
-      'ownerUid': null, // pendiente
-      'createdAt': now,
-      'lastMessageText': null,
-      'lastMessageAt': null,
-      'lastActivityAt': now,
-      'memberCount': 0,
-      'sortAt': 0, // lo conservas para futuro
-      'seededBy': seededByUid,
-    }, SetOptions(merge: true));
-  }
-
-  /// Stream: ¿soy miembro?
+  /// ¿Soy miembro de esta sala? (para habilitar input)
   Stream<DocumentSnapshot<Map<String, dynamic>>> watchMyMembership({
     required String roomId,
     required String uid,
@@ -72,7 +29,26 @@ class RoomsService {
     return memberRef(roomId, uid).snapshots();
   }
 
-  /// Unirse como miembro (idempotente) + incrementar contador
+  Future<void> ensureDefaultRooms({required String seededByUid}) async {
+    final now = FieldValue.serverTimestamp();
+
+    final room1 = _rooms.doc('1');
+    await room1.set({
+      'name': 'TOA',
+      'type': 'public',
+      'ownerUid': null,
+      'createdAt': now,
+      'lastMessageText': null,
+      'lastMessageAt': null,
+      'lastActivityAt': now,
+      'memberCount': 0,
+      'memberIds': <String>[],
+      'sortAt': 0,
+      'seededBy': seededByUid,
+    }, SetOptions(merge: true));
+  }
+
+  /// Unirse (idempotente) + mantener memberIds y memberCount
   Future<void> joinRoom({
     required String roomId,
     required String uid,
@@ -83,10 +59,8 @@ class RoomsService {
     await _db.runTransaction((tx) async {
       final mSnap = await tx.get(mRef);
 
-      if (mSnap.exists) {
-        // ya es miembro
-        return;
-      }
+      // Si ya existe, no volvemos a incrementar
+      if (mSnap.exists) return;
 
       tx.set(mRef, {
         'uid': uid,
@@ -96,7 +70,11 @@ class RoomsService {
 
       tx.set(
         rRef,
-        {'memberCount': FieldValue.increment(1)},
+        {
+          'memberIds': FieldValue.arrayUnion([uid]),
+          'memberCount': FieldValue.increment(1),
+          'lastActivityAt': FieldValue.serverTimestamp(),
+        },
         SetOptions(merge: true),
       );
     });

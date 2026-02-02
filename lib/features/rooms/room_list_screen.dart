@@ -9,7 +9,10 @@ import 'room_model.dart';
 class RoomListScreen extends StatelessWidget {
   final bool embedded;
 
-  const RoomListScreen({super.key, this.embedded = false});
+  const RoomListScreen({
+    super.key,
+    this.embedded = false,
+  });
 
   String _formatRelative(DateTime? dt) {
     if (dt == null) return '';
@@ -27,447 +30,227 @@ class RoomListScreen extends StatelessWidget {
     return '$dd/$mm';
   }
 
-  List<Room> _sortedRooms(List<Room> rooms) {
-    rooms.sort((a, b) {
-      final aTime = a.lastActivityAt ?? a.createdAt;
-      final bTime = b.lastActivityAt ?? b.createdAt;
-      return bTime.compareTo(aTime);
-    });
-    return rooms;
-  }
-
-  Widget _buildList(BuildContext context) {
-    final service = RoomsService();
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-
-    if (uid == null) {
-      return const Center(child: Text('No has iniciado sesión'));
-    }
-
-    return StreamBuilder<List<String>>(
-      stream: service.watchMyRoomIds(uid: uid),
-      builder: (context, idsSnap) {
-        if (idsSnap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
-        if (idsSnap.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Error cargando tus salas: ${idsSnap.error}',
-                textAlign: TextAlign.center,
-              ),
-            ),
-          );
-        }
-
-        final roomIds = idsSnap.data ?? const <String>[];
-        if (roomIds.isEmpty) {
-          return const Center(
-            child: Text(
-              'No hay salas',
-              style: TextStyle(color: Colors.white70),
-            ),
-          );
-        }
-
-        // Nota: `whereIn` tiene límite de 10.
-        if (roomIds.length <= 10) {
-          final query = FirebaseFirestore.instance
-              .collection('rooms')
-              .where(FieldPath.documentId, whereIn: roomIds);
-
-          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: query.snapshots(),
-            builder: (context, roomsSnap) {
-              if (roomsSnap.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-
-              if (roomsSnap.hasError) {
-                return Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text(
-                      'Error cargando tus salas: ${roomsSnap.error}',
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                );
-              }
-
-              final docs = roomsSnap.data?.docs ?? [];
-              final rooms = _sortedRooms(docs.map((d) => Room.fromFirestore(d)).toList());
-
-              return _RoomsListView(
-                rooms: rooms,
-                formatRelative: _formatRelative,
-              );
-            },
-          );
-        }
-
-        // Fallback si hay demasiadas salas: las cargamos una vez.
-        return FutureBuilder<List<Room>>(
-          future: _loadRoomsOnce(roomIds),
-          builder: (context, snap) {
-            if (snap.connectionState != ConnectionState.done) {
-              return const Center(child: CircularProgressIndicator());
-            }
-
-            if (snap.hasError) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    'Error cargando tus salas: ${snap.error}',
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              );
-            }
-
-            final rooms = _sortedRooms(snap.data ?? []);
-            if (rooms.isEmpty) {
-              return const Center(child: Text('No hay salas'));
-            }
-
-            return _RoomsListView(
-              rooms: rooms,
-              formatRelative: _formatRelative,
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<List<Room>> _loadRoomsOnce(List<String> ids) async {
-    final roomsCol = FirebaseFirestore.instance.collection('rooms');
-    final snaps = await Future.wait(ids.map((id) => roomsCol.doc(id).get()));
-    return snaps
-        .where((d) => d.exists)
-        .map((d) => Room.fromFirestore(d as DocumentSnapshot<Map<String, dynamic>>))
-        .toList();
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (embedded) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: const [
-            _MyChatsTitle(),
-            SizedBox(height: 12),
-            Expanded(child: _MyChatsBody()),
-          ],
-        ),
+    final user = FirebaseAuth.instance.currentUser;
+    final uid = user?.uid;
+
+    if (uid == null) {
+      return const Scaffold(
+        body: Center(child: Text('No hay sesión activa.')),
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('ZyraVerse'),
-        actions: [
-          IconButton(
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Crear sala: pendiente')),
-              );
-            },
-            icon: const Icon(Icons.add),
-          ),
-        ],
-      ),
-      body: _buildList(context),
-    );
-  }
-}
+    final roomsService = RoomsService();
 
-class _MyChatsTitle extends StatelessWidget {
-  const _MyChatsTitle();
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: const [
-        Expanded(
-          child: Text(
-            'Mis chats',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              color: Colors.white70,
-            ),
-          ),
-        ),
-        Icon(Icons.chevron_right, color: Colors.white54),
-      ],
-    );
-  }
-}
-
-class _MyChatsBody extends StatelessWidget {
-  const _MyChatsBody();
-
-  @override
-  Widget build(BuildContext context) {
-    final service = RoomsService();
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-
-    if (uid == null) {
-      return const Center(child: Text('No has iniciado sesión'));
-    }
-
-    String formatRelative(DateTime? dt) {
-      if (dt == null) return '';
-      final now = DateTime.now();
-      final diff = now.difference(dt);
-
-      if (diff.inMinutes < 1) return 'Ahora';
-      if (diff.inMinutes < 60) return 'Hace ${diff.inMinutes} min';
-      if (diff.inHours < 24) return 'Hace ${diff.inHours} h';
-      if (diff.inDays == 1) return 'Ayer';
-      if (diff.inDays < 7) return 'Hace ${diff.inDays} días';
-
-      final dd = dt.day.toString().padLeft(2, '0');
-      final mm = dt.month.toString().padLeft(2, '0');
-      return '$dd/$mm';
-    }
-
-    List<Room> sorted(List<Room> rooms) {
-      rooms.sort((a, b) {
-        final aTime = a.lastActivityAt ?? a.createdAt;
-        final bTime = b.lastActivityAt ?? b.createdAt;
-        return bTime.compareTo(aTime);
-      });
-      return rooms;
-    }
-
-    Future<List<Room>> loadOnce(List<String> ids) async {
-      final roomsCol = FirebaseFirestore.instance.collection('rooms');
-      final snaps = await Future.wait(ids.map((id) => roomsCol.doc(id).get()));
-      return snaps
-          .where((d) => d.exists)
-          .map((d) => Room.fromFirestore(d as DocumentSnapshot<Map<String, dynamic>>))
-          .toList();
-    }
-
-    return StreamBuilder<List<String>>(
-      stream: service.watchMyRoomIds(uid: uid),
-      builder: (context, idsSnap) {
-        if (idsSnap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
-        if (idsSnap.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Error cargando tus salas: ${idsSnap.error}',
-                textAlign: TextAlign.center,
-              ),
-            ),
-          );
-        }
-
-        final roomIds = idsSnap.data ?? const <String>[];
-        if (roomIds.isEmpty) {
-          return const Center(
-            child: Text(
-              'No hay salas',
-              style: TextStyle(color: Colors.white70),
-            ),
-          );
-        }
-
-        if (roomIds.length <= 10) {
-          final query = FirebaseFirestore.instance
-              .collection('rooms')
-              .where(FieldPath.documentId, whereIn: roomIds);
-
-          return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: query.snapshots(),
-            builder: (context, roomsSnap) {
-              if (roomsSnap.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-
-              if (roomsSnap.hasError) {
-                return Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text(
-                      'Error cargando tus salas: ${roomsSnap.error}',
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                );
-              }
-
-              final docs = roomsSnap.data?.docs ?? [];
-              final rooms = sorted(docs.map((d) => Room.fromFirestore(d)).toList());
-
-              return _RoomsListView(
-                rooms: rooms,
-                formatRelative: formatRelative,
-              );
-            },
-          );
-        }
-
-        return FutureBuilder<List<Room>>(
-          future: loadOnce(roomIds),
-          builder: (context, snap) {
-            if (snap.connectionState != ConnectionState.done) {
-              return const Center(child: CircularProgressIndicator());
-            }
-
-            if (snap.hasError) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    'Error cargando tus salas: ${snap.error}',
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              );
-            }
-
-            final rooms = sorted(snap.data ?? []);
-            if (rooms.isEmpty) {
-              return const Center(child: Text('No hay salas'));
-            }
-
-            return _RoomsListView(
-              rooms: rooms,
-              formatRelative: formatRelative,
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class _RoomsListView extends StatelessWidget {
-  final List<Room> rooms;
-  final String Function(DateTime?) formatRelative;
-
-  const _RoomsListView({
-    required this.rooms,
-    required this.formatRelative,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 0),
-      itemCount: rooms.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final room = rooms[index];
-
-        final chipText = room.type == RoomType.public ? 'Público' : 'Privado';
-        final lastTime = formatRelative(room.lastActivityAt);
-        final preview = (room.lastMessageText?.trim().isNotEmpty == true)
-            ? room.lastMessageText!.trim()
-            : 'Sin mensajes aún';
-
-        return InkWell(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => ChatScreen(room: room)),
-            );
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 12),
+    final body = Column(
+      children: [
+        if (!embedded) ...[
+          // Header (solo si NO está embebido)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
             child: Row(
               children: [
-                // Placeholder imagen sala
                 Container(
-                  width: 46,
-                  height: 46,
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
                     color: Colors.white10,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(999),
                   ),
-                  child: const Icon(Icons.chat_bubble_outline, color: Colors.white70),
+                  child: const Icon(Icons.person_outline, color: Colors.white70),
                 ),
-                const SizedBox(width: 12),
-
-                // Texto
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Línea 1: chip + título + tiempo derecha
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: Colors.white10,
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text(
-                              chipText,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              room.name,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            lastTime,
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-
-                      // Línea 2: último mensaje (una línea)
                       Text(
-                        preview,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        user?.displayName?.trim().isNotEmpty == true
+                            ? user!.displayName!.trim()
+                            : 'Usuario',
                         style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      const Text(
+                        'Roleando',
+                        style: TextStyle(
+                          fontSize: 12,
                           color: Colors.white60,
-                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],
                   ),
                 ),
+                IconButton(
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Buscar: pendiente')),
+                    );
+                  },
+                  icon: const Icon(Icons.search),
+                ),
+                IconButton(
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Notificaciones: pendiente')),
+                    );
+                  },
+                  icon: const Icon(Icons.notifications_none),
+                ),
               ],
             ),
           ),
-        );
-      },
+        ],
+
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Mis chats',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: () {},
+                icon: const Icon(Icons.chevron_right),
+              ),
+            ],
+          ),
+        ),
+
+        Expanded(
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: roomsService.watchMyRooms(uid: uid),
+            builder: (context, snap) {
+              if (snap.hasError) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text('Error cargando tus chats: ${snap.error}'),
+                  ),
+                );
+              }
+
+              if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              final docs = snap.data?.docs ?? [];
+              if (docs.isEmpty) {
+                return const Center(child: Text('No estás en ninguna sala aún.'));
+              }
+
+              final rooms = docs.map((d) => Room.fromFirestore(d)).toList();
+
+              rooms.sort((a, b) {
+                final da = a.lastActivityAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+                final db = b.lastActivityAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+                return db.compareTo(da);
+              });
+
+              return ListView.separated(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 16),
+                itemCount: rooms.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (context, index) {
+                  final room = rooms[index];
+
+                  final lastTime = _formatRelative(room.lastActivityAt);
+                  final preview = (room.lastMessageText?.trim().isNotEmpty == true)
+                      ? room.lastMessageText!.trim()
+                      : 'Sin mensajes aún';
+
+                  return InkWell(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => ChatScreen(room: room)),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(18),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white10,
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 52,
+                            height: 52,
+                            decoration: BoxDecoration(
+                              color: Colors.white12,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: const Icon(Icons.image_outlined, color: Colors.white70),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        room.name,
+                                        style: const TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      lastTime,
+                                      style: const TextStyle(
+                                        color: Colors.white60,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  preview,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white60,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
     );
+
+    if (embedded) return SafeArea(child: body);
+
+    return Scaffold(body: SafeArea(child: body));
   }
 }

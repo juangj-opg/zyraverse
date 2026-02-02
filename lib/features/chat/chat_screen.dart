@@ -21,14 +21,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late final DocumentReference<Map<String, dynamic>> _roomRef;
   late final CollectionReference<Map<String, dynamic>> _messagesRef;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _messagesStream;
 
   String? _myDisplayName;
 
   @override
   void initState() {
     super.initState();
+
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
+
+    _messagesStream = _messagesRef.orderBy('createdAt', descending: false).snapshots();
+
     _loadMyProfileSnapshot();
   }
 
@@ -43,24 +48,6 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _myDisplayName = (data?['displayName'] as String?)?.trim();
     });
-  }
-
-  Future<void> _safeUpdateRoomActivity({
-    String? lastMessageText,
-    required FieldValue now,
-  }) async {
-    // “Best effort”: si reglas no permiten tocar rooms/{id}, NO rompemos el envío.
-    try {
-      final patch = <String, dynamic>{'lastActivityAt': now};
-      if (lastMessageText != null) {
-        patch['lastMessageText'] = lastMessageText;
-        patch['lastMessageAt'] = now;
-      }
-      await _roomRef.set(patch, SetOptions(merge: true));
-    } on FirebaseException catch (e) {
-      if (e.code == 'permission-denied') return;
-      rethrow;
-    }
   }
 
   Future<void> _sendMessage({required bool isMember}) async {
@@ -78,18 +65,24 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.clear();
 
     final now = FieldValue.serverTimestamp();
+    final batch = FirebaseFirestore.instance.batch();
 
-    // 1) Guardamos SIEMPRE el mensaje con el ESQUEMA CORRECTO
-    await _messagesRef.add({
-      'type': 'user',
+    final msgRef = _messagesRef.doc();
+    batch.set(msgRef, {
+      'type': 'user', // ✅ IMPORTANTE
       'authorId': user.uid,
       'authorDisplayName': safeName,
-      'text': text,
+      'text': text, // ✅ IMPORTANTE
       'createdAt': now,
     });
 
-    // 2) Actualizamos resumen sala (opcional)
-    await _safeUpdateRoomActivity(lastMessageText: text, now: now);
+    batch.set(_roomRef, {
+      'lastMessageText': text,
+      'lastMessageAt': now,
+      'lastActivityAt': now,
+    }, SetOptions(merge: true));
+
+    await batch.commit();
   }
 
   Future<void> _joinRoom() async {
@@ -101,16 +94,16 @@ class _ChatScreenState extends State<ChatScreen> {
     final name = (_myDisplayName ?? '').trim();
     final safeName = name.isNotEmpty ? name : 'Usuario';
 
-    // Mensaje system con ESQUEMA CORRECTO
     await _messagesRef.add({
       'type': 'system',
-      'authorId': '',
-      'authorDisplayName': '',
       'text': '$safeName se ha unido a esta sala.',
       'createdAt': FieldValue.serverTimestamp(),
     });
 
-    await _safeUpdateRoomActivity(lastMessageText: null, now: FieldValue.serverTimestamp());
+    await _roomRef.set(
+      {'lastActivityAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
+    );
   }
 
   String _formatDateSeparator(DateTime dt) {
@@ -118,33 +111,23 @@ class _ChatScreenState extends State<ChatScreen> {
       'ene', 'feb', 'mar', 'abr', 'may', 'jun',
       'jul', 'ago', 'sept', 'oct', 'nov', 'dic'
     ];
-
     final day = dt.day.toString().padLeft(2, '0');
     final month = months[dt.month - 1];
     final year = dt.year.toString();
     final hh = dt.hour.toString().padLeft(2, '0');
     final mi = dt.minute.toString().padLeft(2, '0');
-
     return '$day $month $year, $hh:$mi';
   }
 
   bool _needsSeparator(DateTime current, DateTime? previous) {
     if (previous == null) return true;
-
     final diff = current.difference(previous);
+
     final dayChanged = current.year != previous.year ||
         current.month != previous.month ||
         current.day != previous.day;
 
     return dayChanged || diff.inHours >= 3;
-  }
-
-  String _groupKey(Message msg) {
-    final aId = msg.authorId.trim();
-    if (aId.isNotEmpty) return aId;
-    final aName = msg.authorDisplayName.trim();
-    if (aName.isNotEmpty) return aName;
-    return 'unknown';
   }
 
   @override
@@ -156,9 +139,13 @@ class _ChatScreenState extends State<ChatScreen> {
       stream: _roomRef.snapshots(),
       builder: (context, roomSnap) {
         final roomData = roomSnap.data?.data() ?? {};
+
         final roomName = (roomData['name'] as String?) ?? widget.room.name;
         final ownerText = '(Owner: pendiente)';
-        final memberCount = (roomData['memberCount'] is int) ? roomData['memberCount'] as int : 24;
+
+        final memberCount = (roomData['memberCount'] is int)
+            ? roomData['memberCount'] as int
+            : ((roomData['memberIds'] is List) ? (roomData['memberIds'] as List).length : 0);
 
         return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
           stream: (uid == null)
@@ -171,12 +158,11 @@ class _ChatScreenState extends State<ChatScreen> {
               body: SafeArea(
                 child: Column(
                   children: [
-                    // HEADER 3 FILAS
+                    // HEADER 3 FILAS (como acordamos)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                       child: Column(
                         children: [
-                          // Fila 1
                           Row(
                             children: [
                               IconButton(
@@ -200,13 +186,19 @@ class _ChatScreenState extends State<ChatScreen> {
                                   children: [
                                     Text(
                                       roomName,
-                                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                                      style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                      ),
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
                                       ownerText,
-                                      style: const TextStyle(fontSize: 12, color: Colors.white60),
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white60,
+                                      ),
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                   ],
@@ -232,10 +224,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ],
                           ),
-
                           const SizedBox(height: 10),
-
-                          // Fila 2
                           Row(
                             children: [
                               Expanded(
@@ -292,10 +281,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ],
                           ),
-
                           const SizedBox(height: 10),
-
-                          // Fila 3
                           Container(
                             height: 46,
                             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -324,7 +310,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     // MENSAJES
                     Expanded(
                       child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                        stream: _messagesRef.orderBy('createdAt', descending: false).snapshots(),
+                        stream: _messagesStream,
                         builder: (context, snapshot) {
                           if (snapshot.connectionState == ConnectionState.waiting) {
                             return const Center(child: CircularProgressIndicator());
@@ -344,7 +330,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             return const Center(child: Text('No hay mensajes'));
                           }
 
-                          final messages = docs.map((d) => Message.fromDoc(d)).toList();
+                          final messages = docs.map((d) => Message.fromFirestore(d)).toList();
 
                           final items = <_ChatItem>[];
                           DateTime? prevTime;
@@ -352,30 +338,22 @@ class _ChatScreenState extends State<ChatScreen> {
                           for (int i = 0; i < messages.length; i++) {
                             final m = messages[i];
 
-                            final needsSep = _needsSeparator(m.createdAt, prevTime);
-                            if (needsSep) {
+                            if (_needsSeparator(m.createdAt, prevTime)) {
                               items.add(_ChatItem.separator(_formatDateSeparator(m.createdAt)));
                             }
 
                             final prevMsg = (i > 0) ? messages[i - 1] : null;
                             final nextMsg = (i < messages.length - 1) ? messages[i + 1] : null;
 
-                            final mKey = _groupKey(m);
-                            final prevKey = prevMsg == null ? '' : _groupKey(prevMsg);
-                            final nextKey = nextMsg == null ? '' : _groupKey(nextMsg);
-
-                            // Agrupamos SOLO mensajes de usuario
-                            final sameAsPrev =
-                                prevMsg != null &&
+                            final sameAsPrev = prevMsg != null &&
                                 prevMsg.type == 'user' &&
                                 m.type == 'user' &&
-                                mKey == prevKey;
+                                prevMsg.authorId == m.authorId;
 
-                            final sameAsNext =
-                                nextMsg != null &&
+                            final sameAsNext = nextMsg != null &&
                                 nextMsg.type == 'user' &&
                                 m.type == 'user' &&
-                                mKey == nextKey;
+                                nextMsg.authorId == m.authorId;
 
                             items.add(
                               _ChatItem.message(
@@ -406,7 +384,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                       ),
                                       child: Text(
                                         item.separatorText!,
-                                        style: const TextStyle(fontSize: 12, color: Colors.white70),
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.white70,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -435,15 +416,17 @@ class _ChatScreenState extends State<ChatScreen> {
                               }
 
                               final isMe = uid != null && msg.authorId == uid;
+
                               final name = msg.authorDisplayName.trim().isNotEmpty
                                   ? msg.authorDisplayName.trim()
                                   : 'Usuario';
 
-                              return _BlockBubble(
+                              return _MessageGroupBubble(
                                 isMe: isMe,
                                 displayName: name,
                                 text: msg.text,
-                                showHeaderAndAvatar: item.isFirstOfGroup!,
+                                showHeader: item.isFirstOfGroup!,
+                                showAvatar: item.isFirstOfGroup!,
                                 addBottomGap: item.isLastOfGroup!,
                               );
                             },
@@ -452,18 +435,24 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
 
-                    // BARRA INFERIOR
+                    // INPUT: si NO es miembro, botón "Unirse al chat" (como ProjectZ)
                     SafeArea(
                       top: false,
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
-                        child: isMember
-                            ? _ChatInputBar(
-                                controller: _controller,
-                                enabled: true,
-                                onSend: () => _sendMessage(isMember: true),
+                        child: (!isMember)
+                            ? SizedBox(
+                                height: 52,
+                                width: double.infinity,
+                                child: ElevatedButton(
+                                  onPressed: _joinRoom,
+                                  child: const Text('Unirse al chat'),
+                                ),
                               )
-                            : _JoinChatBar(onJoin: _joinRoom),
+                            : _ChatComposer(
+                                controller: _controller,
+                                onSend: () => _sendMessage(isMember: true),
+                              ),
                       ),
                     ),
                   ],
@@ -496,38 +485,12 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-class _JoinChatBar extends StatelessWidget {
-  final VoidCallback onJoin;
-
-  const _JoinChatBar({required this.onJoin});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 54,
-      width: double.infinity,
-      child: ElevatedButton(
-        onPressed: onJoin,
-        style: ElevatedButton.styleFrom(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        ),
-        child: const Text(
-          'Unirse al chat',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-      ),
-    );
-  }
-}
-
-class _ChatInputBar extends StatelessWidget {
+class _ChatComposer extends StatelessWidget {
   final TextEditingController controller;
-  final bool enabled;
   final VoidCallback onSend;
 
-  const _ChatInputBar({
+  const _ChatComposer({
     required this.controller,
-    required this.enabled,
     required this.onSend,
   });
 
@@ -535,20 +498,7 @@ class _ChatInputBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        // Iconos ARRIBA
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: const [
-            _ActionIcon(Icons.graphic_eq),
-            _ActionIcon(Icons.image_outlined),
-            _ActionIcon(Icons.emoji_emotions_outlined),
-            _ActionIcon(Icons.auto_awesome_outlined),
-            _ActionIcon(Icons.casino_outlined),
-            _ActionIcon(Icons.add),
-          ],
-        ),
-        const SizedBox(height: 8),
-
+        // Input (arriba)
         Row(
           children: [
             const CircleAvatar(
@@ -566,7 +516,6 @@ class _ChatInputBar extends StatelessWidget {
                 ),
                 child: TextField(
                   controller: controller,
-                  enabled: enabled,
                   decoration: const InputDecoration(
                     hintText: 'Escribe tu mensaje...',
                     border: InputBorder.none,
@@ -584,9 +533,24 @@ class _ChatInputBar extends StatelessWidget {
               ),
               child: IconButton(
                 icon: const Icon(Icons.send),
-                onPressed: enabled ? onSend : null,
+                onPressed: onSend,
               ),
             ),
+          ],
+        ),
+
+        const SizedBox(height: 8),
+
+        // Toolbar (abajo) estilo ProjectZ (placeholders)
+        Row(
+          children: const [
+            _ToolIcon(Icons.graphic_eq),
+            _ToolIcon(Icons.image_outlined),
+            _ToolIcon(Icons.emoji_emotions_outlined),
+            _ToolIcon(Icons.auto_awesome_outlined),
+            _ToolIcon(Icons.casino_outlined),
+            Spacer(),
+            _ToolIcon(Icons.add),
           ],
         ),
       ],
@@ -594,14 +558,14 @@ class _ChatInputBar extends StatelessWidget {
   }
 }
 
-class _ActionIcon extends StatelessWidget {
+class _ToolIcon extends StatelessWidget {
   final IconData icon;
-  const _ActionIcon(this.icon);
+  const _ToolIcon(this.icon);
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 40,
+      width: 44,
       height: 34,
       child: Center(
         child: Icon(icon, color: Colors.white70, size: 22),
@@ -610,32 +574,30 @@ class _ActionIcon extends StatelessWidget {
   }
 }
 
-/// Bloque estilo ProjectZ (como tu 2ª imagen):
-/// - Nombre (Usuario/Kyrox) SOLO al inicio del grupo
-/// - Avatar SOLO al inicio del grupo
-/// - Burbujas compactas, poco redondeo
-class _BlockBubble extends StatelessWidget {
+class _MessageGroupBubble extends StatelessWidget {
   final bool isMe;
   final String displayName;
   final String text;
 
-  final bool showHeaderAndAvatar;
+  final bool showHeader;
+  final bool showAvatar;
   final bool addBottomGap;
 
-  const _BlockBubble({
+  const _MessageGroupBubble({
     required this.isMe,
     required this.displayName,
     required this.text,
-    required this.showHeaderAndAvatar,
+    required this.showHeader,
+    required this.showAvatar,
     required this.addBottomGap,
   });
 
   @override
   Widget build(BuildContext context) {
     final bubbleColor = Colors.white10;
-    final rowAlign = isMe ? MainAxisAlignment.end : MainAxisAlignment.start;
 
-    final radius = BorderRadius.circular(12);
+    final align = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final rowAlign = isMe ? MainAxisAlignment.end : MainAxisAlignment.start;
 
     return Padding(
       padding: EdgeInsets.only(bottom: addBottomGap ? 14 : 6),
@@ -643,8 +605,7 @@ class _BlockBubble extends StatelessWidget {
         mainAxisAlignment: rowAlign,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // IZQ: avatar o hueco
-          if (!isMe && showHeaderAndAvatar) ...[
+          if (!isMe && showAvatar) ...[
             const CircleAvatar(
               backgroundColor: Colors.white10,
               child: Icon(Icons.person, color: Colors.white70),
@@ -654,13 +615,11 @@ class _BlockBubble extends StatelessWidget {
             const SizedBox(width: 40),
             const SizedBox(width: 10),
           ],
-
-          // Columna (nombre + burbuja)
           Flexible(
             child: Column(
-              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              crossAxisAlignment: align,
               children: [
-                if (showHeaderAndAvatar)
+                if (showHeader)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(
@@ -671,23 +630,18 @@ class _BlockBubble extends StatelessWidget {
                       ),
                     ),
                   ),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: bubbleColor,
-                      borderRadius: radius,
-                    ),
-                    child: Text(text),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: bubbleColor,
+                    borderRadius: BorderRadius.circular(14),
                   ),
+                  child: Text(text),
                 ),
               ],
             ),
           ),
-
-          // DCHA: avatar o hueco
-          if (isMe && showHeaderAndAvatar) ...[
+          if (isMe && showAvatar) ...[
             const SizedBox(width: 10),
             const CircleAvatar(
               backgroundColor: Colors.white10,
