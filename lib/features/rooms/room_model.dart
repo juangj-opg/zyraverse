@@ -1,49 +1,51 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-class RoomModel {
+enum RoomType { public, private }
+
+class Room {
   final String id;
-  final String name; // "TOA"
-  final String type; // "public" | "private"
-  final String? ownerId;
+  final String name;
+  final RoomType type;
 
-  final int membersCount;
+  final DateTime createdAt;
 
-  final String lastMessageText;
-  final DateTime? lastMessageAt;
+  // Para el listado estilo ProjectZ
+  final String? lastMessageText;
+  final DateTime? lastActivityAt;
 
-  const RoomModel({
+  // Para header del chat (miembros)
+  final int? memberCount;
+
+  const Room({
     required this.id,
     required this.name,
     required this.type,
-    required this.membersCount,
-    required this.lastMessageText,
-    required this.lastMessageAt,
-    this.ownerId,
+    required this.createdAt,
+    this.lastMessageText,
+    this.lastActivityAt,
+    this.memberCount,
   });
 
-  static DateTime? _parseDate(dynamic v) {
-    if (v is Timestamp) return v.toDate();
-    if (v is DateTime) return v;
-    return null;
-  }
+  factory Room.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? {};
 
-  factory RoomModel.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? <String, dynamic>{};
+    final createdAtRaw = data['createdAt'];
+    final lastActivityRaw = data['lastActivityAt'];
 
-    final mc = data['membersCount'];
-    final membersCount = mc is num ? mc.toInt() : 0;
-
-    return RoomModel(
+    return Room(
       id: doc.id,
-      name: (data['name'] ?? 'Sala').toString(),
-      type: (data['type'] ?? 'public').toString(),
-      ownerId: data['ownerId']?.toString(),
-      membersCount: membersCount,
-      lastMessageText: (data['lastMessageText'] ?? 'Sin mensajes aún').toString(),
-      lastMessageAt: _parseDate(data['lastMessageAt']),
+      name: (data['name'] as String?) ?? 'Sala',
+      type: ((data['type'] as String?) ?? 'public') == 'private'
+          ? RoomType.private
+          : RoomType.public,
+      createdAt: createdAtRaw is Timestamp
+          ? createdAtRaw.toDate()
+          : DateTime.fromMillisecondsSinceEpoch(0),
+      lastMessageText: data['lastMessageText'] as String?,
+      lastActivityAt: lastActivityRaw is Timestamp
+          ? lastActivityRaw.toDate()
+          : null,
+      memberCount: (data['memberCount'] is int) ? data['memberCount'] as int : null,
     );
   }
-
-  String get typeLabel => type == 'private' ? 'Privada' : 'Pública';
-  bool get isPublic => type != 'private';
 }

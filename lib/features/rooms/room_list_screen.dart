@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/services/rooms_service.dart';
@@ -5,49 +6,35 @@ import '../chat/chat_screen.dart';
 import 'room_model.dart';
 
 class RoomListScreen extends StatelessWidget {
-  RoomListScreen({super.key});
+  const RoomListScreen({super.key});
 
-  final RoomsService _roomsService = RoomsService();
-
-  String _relativeTime(DateTime? dt) {
+  String _formatRelative(DateTime? dt) {
     if (dt == null) return '';
     final now = DateTime.now();
     final diff = now.difference(dt);
 
-    if (diff.inSeconds < 60) return 'Ahora';
+    if (diff.inMinutes < 1) return 'Ahora';
     if (diff.inMinutes < 60) return 'Hace ${diff.inMinutes} min';
     if (diff.inHours < 24) return 'Hace ${diff.inHours} h';
     if (diff.inDays == 1) return 'Ayer';
     if (diff.inDays < 7) return 'Hace ${diff.inDays} días';
 
-    final d = dt.day.toString().padLeft(2, '0');
-    final m = dt.month.toString().padLeft(2, '0');
-    return '$d/$m';
-  }
-
-  Widget _chip(String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C26),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Text(text, style: const TextStyle(color: Colors.white70, fontSize: 11)),
-    );
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mm = dt.month.toString().padLeft(2, '0');
+    return '$dd/$mm';
   }
 
   @override
   Widget build(BuildContext context) {
+    final service = RoomsService();
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0B0B0F),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0B0B0F),
-        elevation: 0,
         title: const Text('ZyraVerse'),
         actions: [
           IconButton(
             onPressed: () {
+              // placeholder crear sala
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Crear sala: pendiente')),
               );
@@ -56,97 +43,118 @@ class RoomListScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: StreamBuilder<List<RoomModel>>(
-        stream: _roomsService.watchRooms(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(
-              child: Text(
-                'Error cargando salas: ${snap.error}',
-                style: const TextStyle(color: Colors.white70),
-              ),
-            );
-          }
-          if (!snap.hasData) {
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: service.watchRooms(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          final rooms = snap.data!;
-          if (rooms.isEmpty) {
-            return const Center(
-              child: Text('No hay salas aún', style: TextStyle(color: Colors.white70)),
+          if (snapshot.hasError) {
+            return Center(
+              child: Text('Error cargando salas: ${snapshot.error}'),
             );
           }
 
+          final docs = snapshot.data?.docs ?? [];
+          if (docs.isEmpty) {
+            return const Center(child: Text('No hay salas'));
+          }
+
+          final rooms = docs.map((d) => Room.fromFirestore(d)).toList();
+
           return ListView.separated(
+            padding: const EdgeInsets.symmetric(vertical: 10),
             itemCount: rooms.length,
-            separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF1A1A22)),
-            itemBuilder: (context, i) {
-              final room = rooms[i];
-              final time = _relativeTime(room.lastMessageAt);
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final room = rooms[index];
+
+              final chipText = room.type == RoomType.public ? 'Público' : 'Privado';
+              final lastTime = _formatRelative(room.lastActivityAt);
+              final preview = (room.lastMessageText?.trim().isNotEmpty == true)
+                  ? room.lastMessageText!.trim()
+                  : 'Sin mensajes aún';
 
               return InkWell(
-                onTap: () async {
-                  // Garantizamos campos base por si la sala está vieja
-                  await _roomsService.ensureRoomBaseFields(room.id);
-
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => ChatScreen(roomId: room.id)),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => ChatScreen(room: room)),
                   );
                 },
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   child: Row(
                     children: [
-                      CircleAvatar(
-                        radius: 22,
-                        backgroundColor: const Color(0xFF1C1C26),
-                        child: Icon(
-                          Icons.chat_bubble_outline,
-                          color: Colors.white.withOpacity(0.85),
+                      // Placeholder imagen sala
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: Colors.white10,
+                          borderRadius: BorderRadius.circular(14),
                         ),
+                        child: const Icon(Icons.chat_bubble_outline, color: Colors.white70),
                       ),
                       const SizedBox(width: 12),
+
+                      // Texto
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            // Línea 1: chip + título + tiempo derecha
                             Row(
                               children: [
-                                Expanded(
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white10,
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
                                   child: Text(
-                                    room.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
+                                    chipText,
                                     style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 16,
+                                      fontSize: 12,
+                                      color: Colors.white70,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
                                 ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    room.name,
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
                                 const SizedBox(width: 10),
-                                if (time.isNotEmpty)
-                                  Text(time, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                Text(
+                                  lastTime,
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 6),
+
+                            // Línea 2: último mensaje (una línea)
                             Text(
-                              room.lastMessageText,
+                              preview,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white70, fontSize: 13),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                _chip(room.typeLabel),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Miembros: ${room.membersCount}',
-                                  style: const TextStyle(color: Colors.white54, fontSize: 12),
-                                ),
-                              ],
+                              style: const TextStyle(
+                                color: Colors.white60,
+                                fontSize: 13,
+                              ),
                             ),
                           ],
                         ),

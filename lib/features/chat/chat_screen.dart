@@ -1,257 +1,208 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 
-import '../../core/services/message_service.dart';
 import '../../core/services/rooms_service.dart';
 import '../rooms/room_model.dart';
 import 'message_model.dart';
 
 class ChatScreen extends StatefulWidget {
-  final String roomId;
-  const ChatScreen({super.key, required this.roomId});
+  final Room room;
+
+  const ChatScreen({super.key, required this.room});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatItem {
-  final MessageModel? message;
-  final String? separatorText;
-
-  const _ChatItem._({this.message, this.separatorText});
-
-  bool get isSeparator => separatorText != null;
-
-  factory _ChatItem.message(MessageModel m) => _ChatItem._(message: m);
-  factory _ChatItem.separator(String text) => _ChatItem._(separatorText: text);
-}
-
 class _ChatScreenState extends State<ChatScreen> {
-  final _textCtrl = TextEditingController();
-  final _scrollCtrl = ScrollController();
+  final _roomsService = RoomsService();
 
-  final RoomsService _roomsService = RoomsService();
-  final MessageService _messageService = MessageService();
+  final TextEditingController _controller = TextEditingController();
 
-  String _myDisplayName = 'Usuario';
-  bool _loadingProfile = true;
+  late final DocumentReference<Map<String, dynamic>> _roomRef;
+  late final CollectionReference<Map<String, dynamic>> _messagesRef;
 
-  String get _uid => FirebaseAuth.instance.currentUser!.uid;
+  String? _myDisplayName;
 
   @override
   void initState() {
     super.initState();
-    _loadMyProfile();
+
+    _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
+    _messagesRef = _roomRef.collection('messages');
+
+    _loadMyProfileSnapshot();
   }
 
-  @override
-  void dispose() {
-    _textCtrl.dispose();
-    _scrollCtrl.dispose();
-    super.dispose();
-  }
+  Future<void> _loadMyProfileSnapshot() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
 
-  Future<void> _loadMyProfile() async {
-    try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(_uid).get();
-      final data = doc.data() ?? {};
-      final dn = (data['displayName'] ?? '').toString().trim();
-      if (dn.isNotEmpty) _myDisplayName = dn;
-    } finally {
-      if (mounted) setState(() => _loadingProfile = false);
-    }
-  }
+    final snap =
+        await FirebaseFirestore.instance.collection('users').doc(uid).get();
 
-  void _scrollToBottomSoon() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollCtrl.hasClients) return;
-      _scrollCtrl.animateTo(
-        _scrollCtrl.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+    final data = snap.data();
+    if (!mounted) return;
+
+    setState(() {
+      _myDisplayName = (data?['displayName'] as String?)?.trim();
     });
   }
 
-  // "29 sept 2021, 14:43"
-  String _formatGapSeparator(DateTime dt) {
-    const months = ['ene','feb','mar','abr','may','jun','jul','ago','sept','oct','nov','dic'];
-    final d = dt.day.toString().padLeft(2, '0');
-    final m = months[(dt.month - 1).clamp(0, 11)];
-    final y = dt.year.toString();
-    final hh = dt.hour.toString().padLeft(2, '0');
-    final mm = dt.minute.toString().padLeft(2, '0');
-    return '$d $m $y, $hh:$mm';
+  Future<void> _sendMessage({required bool isMember}) async {
+    if (!isMember) return;
+
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final displayName = (_myDisplayName ?? '').trim();
+    final safeName = displayName.isNotEmpty ? displayName : 'Usuario';
+
+    _controller.clear();
+
+    final now = FieldValue.serverTimestamp();
+
+    // 1) Crear el mensaje
+    // 2) Actualizar "último mensaje" de la sala (para el listado)
+    final batch = FirebaseFirestore.instance.batch();
+
+    final msgRef = _messagesRef.doc();
+    batch.set(msgRef, {
+      'type': 'text',
+      'authorId': user.uid,
+      'authorDisplayName': safeName,
+      'content': text,
+      'createdAt': now,
+    });
+
+    batch.set(_roomRef, {
+      'lastMessageText': text,
+      'lastMessageAt': now,
+      'lastActivityAt': now,
+    }, SetOptions(merge: true));
+
+    await batch.commit();
   }
 
   Future<void> _joinRoom() async {
-    await _roomsService.joinRoom(roomId: widget.roomId, displayName: _myDisplayName);
-    await _messageService.sendSystemMessage(
-      roomId: widget.roomId,
-      text: '$_myDisplayName se ha unido a esta sala.',
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    await _roomsService.joinRoom(roomId: widget.room.id, uid: user.uid);
+
+    // Mensaje de sistema opcional (no depende de ser miembro por reglas)
+    final name = (_myDisplayName ?? '').trim();
+    final safeName = name.isNotEmpty ? name : 'Usuario';
+
+    await _messagesRef.add({
+      'type': 'system',
+      'authorId': null,
+      'authorDisplayName': null,
+      'content': '$safeName se ha unido a esta sala.',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    // También actualizamos última actividad
+    await _roomRef.set(
+      {'lastActivityAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
     );
   }
 
-  Future<void> _leaveRoom() async {
-    await _roomsService.leaveRoom(roomId: widget.roomId);
-    await _messageService.sendSystemMessage(
-      roomId: widget.roomId,
-      text: '$_myDisplayName ha abandonado esta sala.',
-    );
+  String _formatRelative(DateTime? dt) {
+    if (dt == null) return '';
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+
+    if (diff.inMinutes < 1) return 'Ahora';
+    if (diff.inMinutes < 60) return 'Hace ${diff.inMinutes} min';
+    if (diff.inHours < 24) return 'Hace ${diff.inHours} h';
+    if (diff.inDays == 1) return 'Ayer';
+    if (diff.inDays < 7) return 'Hace ${diff.inDays} días';
+
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mm = dt.month.toString().padLeft(2, '0');
+    return '$dd/$mm';
   }
 
-  Future<void> _sendMessage(bool isMember) async {
-    if (!isMember) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Debes unirte a la sala para poder escribir.')),
-      );
-      return;
-    }
+  String _formatDateSeparator(DateTime dt) {
+    const months = [
+      'ene', 'feb', 'mar', 'abr', 'may', 'jun',
+      'jul', 'ago', 'sept', 'oct', 'nov', 'dic'
+    ];
 
-    final text = _textCtrl.text.trim();
-    if (text.isEmpty) return;
+    final day = dt.day.toString().padLeft(2, '0');
+    final month = months[dt.month - 1];
+    final year = dt.year.toString();
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mi = dt.minute.toString().padLeft(2, '0');
 
-    _textCtrl.clear();
-    await _messageService.sendUserMessage(
-      roomId: widget.roomId,
-      text: text,
-      authorDisplayName: _myDisplayName,
-    );
-    _scrollToBottomSoon();
+    return '$day $month $year, $hh:$mi';
   }
 
-  void _openInfoSheet({required bool isMember}) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF12121A),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (_) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 44,
-                  height: 5,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                const Row(
-                  children: [
-                    Icon(Icons.info_outline, color: Colors.white70),
-                    SizedBox(width: 10),
-                    Text(
-                      'Información de la sala',
-                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'Placeholder: aquí irá la información completa, miembros, reglas, etc.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-                const SizedBox(height: 16),
-                if (isMember)
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton(
-                      onPressed: () async {
-                        Navigator.pop(context);
-                        await _leaveRoom();
-                      },
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white,
-                        side: const BorderSide(color: Colors.white24),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      child: const Text('Abandonar sala'),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
+  bool _needsSeparator(DateTime current, DateTime? previous) {
+    if (previous == null) return true;
+    final diff = current.difference(previous);
 
-  // Preview de miembros tipo ProjectZ: iconos pisados y número (sin “marco” alrededor)
-  Widget _membersPreviewCount(int countIcons) {
-    final n = countIcons.clamp(0, 3);
-    return SizedBox(
-      width: 70,
-      height: 24,
-      child: Stack(
-        children: List.generate(n, (i) {
-          final left = (i * 14).toDouble();
-          return Positioned(
-            left: left,
-            top: 0,
-            child: CircleAvatar(
-              radius: 10,
-              backgroundColor: const Color(0xFF1C1C26),
-              child: Icon(Icons.person, size: 14, color: Colors.white.withOpacity(0.85)),
-            ),
-          );
-        }),
-      ),
-    );
+    // separador si cambia el día o si hay gap >= 3h
+    final dayChanged = current.year != previous.year ||
+        current.month != previous.month ||
+        current.day != previous.day;
+
+    return dayChanged || diff.inHours >= 3;
   }
 
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0B0B0F),
-        body: Center(child: Text('No autenticado', style: TextStyle(color: Colors.white70))),
-      );
-    }
+    final uid = user?.uid;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0B0B0F),
-      body: SafeArea(
-        child: StreamBuilder<RoomModel?>(
-          stream: _roomsService.watchRoom(widget.roomId),
-          builder: (context, roomSnap) {
-            final room = roomSnap.data;
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _roomRef.snapshots(),
+      builder: (context, roomSnap) {
+        final roomData = roomSnap.data?.data() ?? {};
+        final roomName = (roomData['name'] as String?) ?? widget.room.name;
+        final ownerText = '(Owner: pendiente)';
+        final memberCount = (roomData['memberCount'] is int)
+            ? roomData['memberCount'] as int
+            : 24; // fallback placeholder si no existe
 
-            final roomName = room?.name ?? 'Sala';
-            final ownerLine = '(Owner: pendiente)';
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: (uid == null)
+              ? const Stream.empty()
+              : _roomsService.watchMyMembership(roomId: widget.room.id, uid: uid),
+          builder: (context, memberSnap) {
+            final isMember = memberSnap.data?.exists == true;
 
-            return StreamBuilder<bool>(
-              stream: _roomsService.watchIsMember(widget.roomId),
-              builder: (context, memberSnap) {
-                final isMember = memberSnap.data ?? false;
-
-                return Column(
+            return Scaffold(
+              body: SafeArea(
+                child: Column(
                   children: [
-                    // ---------------- HEADER (3 filas) ----------------
+                    // HEADER 3 FILAS
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                       child: Column(
                         children: [
-                          // Fila 1
+                          // Fila 1: back + img sala + nombre + owner + info
                           Row(
                             children: [
                               IconButton(
                                 onPressed: () => Navigator.pop(context),
-                                icon: const Icon(Icons.arrow_back, color: Colors.white),
+                                icon: const Icon(Icons.arrow_back),
                               ),
                               const SizedBox(width: 6),
-                              const CircleAvatar(
-                                radius: 18,
-                                backgroundColor: Color(0xFF1C1C26),
-                                child: Icon(Icons.image_outlined, color: Colors.white70),
+                              Container(
+                                width: 38,
+                                height: 38,
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: const Icon(Icons.image_outlined, size: 20),
                               ),
                               const SizedBox(width: 10),
                               Expanded(
@@ -260,431 +211,544 @@ class _ChatScreenState extends State<ChatScreen> {
                                   children: [
                                     Text(
                                       roomName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
-                                        color: Colors.white,
                                         fontSize: 18,
-                                        fontWeight: FontWeight.w700,
+                                        fontWeight: FontWeight.w600,
                                       ),
+                                      overflow: TextOverflow.ellipsis,
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
-                                      ownerLine,
-                                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                                      ownerText,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white60,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
                                     ),
                                   ],
                                 ),
                               ),
                               IconButton(
-                                onPressed: () => _openInfoSheet(isMember: isMember),
-                                icon: const Icon(Icons.info_outline, color: Colors.white),
+                                onPressed: () {
+                                  // placeholder info
+                                  showDialog(
+                                    context: context,
+                                    builder: (_) => AlertDialog(
+                                      title: const Text('Info'),
+                                      content: const Text('Pendiente de implementar.'),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.pop(context),
+                                          child: const Text('OK'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.info_outline),
                               ),
                             ],
                           ),
 
                           const SizedBox(height: 10),
 
-                          // Fila 2: Noticias izq + Miembros dcha
+                          // Fila 2: Noticias (izq) + miembros (dcha, sin borde)
                           Row(
                             children: [
                               Expanded(
                                 child: Container(
                                   height: 44,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF12121A),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: Colors.white10),
+                                    color: Colors.white10,
+                                    borderRadius: BorderRadius.circular(14),
                                   ),
-                                  child: InkWell(
-                                    borderRadius: BorderRadius.circular(12),
-                                    onTap: () {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(content: Text('Noticias: pendiente')),
-                                      );
-                                    },
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                                      child: Row(
-                                        children: [
-                                          const Icon(Icons.campaign_outlined, color: Colors.white70),
-                                          const SizedBox(width: 10),
-                                          const Expanded(
-                                            child: Text(
-                                              'Noticias',
-                                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                                            ),
-                                          ),
-                                          const Icon(Icons.chevron_right, color: Colors.white54),
-                                        ],
+                                  child: Row(
+                                    children: const [
+                                      Icon(Icons.campaign_outlined, size: 18),
+                                      SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          'Noticias',
+                                          style: TextStyle(fontWeight: FontWeight.w600),
+                                        ),
                                       ),
-                                    ),
+                                      Icon(Icons.chevron_right),
+                                    ],
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 10),
+                              const SizedBox(width: 12),
 
-                              // Miembros: iconos pisados + contador (sin marco alrededor)
-                              StreamBuilder<int>(
-                                stream: _roomsService.watchMembersPreviewCount(widget.roomId, limit: 3),
-                                builder: (context, prevSnap) {
-                                  final iconsCount = prevSnap.data ?? 0;
-                                  final membersCount = room?.membersCount ?? 0;
-
-                                  return Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      _membersPreviewCount(iconsCount),
-                                      Text(
-                                        '$membersCount',
-                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                              // Bloque miembros estilo ProjectZ (avatars pisados + número)
+                              SizedBox(
+                                height: 44,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SizedBox(
+                                      width: 64,
+                                      height: 44,
+                                      child: Stack(
+                                        alignment: Alignment.centerRight,
+                                        children: [
+                                          _memberAvatar(left: 0),
+                                          _memberAvatar(left: 14),
+                                          _memberAvatar(left: 28),
+                                        ],
                                       ),
-                                    ],
-                                  );
-                                },
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '$memberCount',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ],
                           ),
 
                           const SizedBox(height: 10),
 
-                          // Fila 3: Roleplay selector (placeholder)
+                          // Fila 3: selector Roleplay (placeholder)
                           Container(
                             height: 46,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF12121A),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white10),
+                              color: Colors.white10,
+                              borderRadius: BorderRadius.circular(14),
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.shield_outlined, color: Colors.white70),
-                                  const SizedBox(width: 10),
-                                  const Expanded(
-                                    child: Text(
-                                      'Roleplay',
-                                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                                    ),
+                            child: Row(
+                              children: const [
+                                Icon(Icons.shield_outlined, size: 18),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Roleplay',
+                                    style: TextStyle(fontWeight: FontWeight.w600),
                                   ),
-                                  const Icon(Icons.keyboard_arrow_down, color: Colors.white70),
-                                ],
-                              ),
+                                ),
+                                Icon(Icons.expand_more),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
 
-                    const Divider(height: 1, color: Color(0xFF1A1A22)),
-
-                    // ---------------- MENSAJES ----------------
+                    // MENSAJES
                     Expanded(
-                      child: StreamBuilder<List<MessageModel>>(
-                        stream: _messageService.watchMessages(widget.roomId),
-                        builder: (context, msgSnap) {
-                          if (msgSnap.hasError) {
-                            return Center(
-                              child: Text('Error: ${msgSnap.error}', style: const TextStyle(color: Colors.white70)),
-                            );
-                          }
-                          if (!msgSnap.hasData) {
+                      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: _messagesRef
+                            .orderBy('createdAt', descending: false)
+                            .snapshots(),
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState == ConnectionState.waiting) {
                             return const Center(child: CircularProgressIndicator());
                           }
 
-                          final msgs = msgSnap.data!;
-                          final items = <_ChatItem>[];
-
-                          DateTime? prev;
-                          for (final m in msgs) {
-                            if (prev != null) {
-                              final gapMin = m.createdAt.difference(prev!).inMinutes;
-                              if (gapMin >= 180) {
-                                items.add(_ChatItem.separator(_formatGapSeparator(m.createdAt)));
-                              }
-                            }
-                            items.add(_ChatItem.message(m));
-                            prev = m.createdAt;
+                          if (snapshot.hasError) {
+                            return Center(
+                              child: Text(
+                                'Error cargando mensajes: ${snapshot.error}',
+                                textAlign: TextAlign.center,
+                              ),
+                            );
                           }
 
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (_scrollCtrl.hasClients) {
-                              _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+                          final docs = snapshot.data?.docs ?? [];
+                          if (docs.isEmpty) {
+                            return const Center(child: Text('No hay mensajes'));
+                          }
+
+                          final messages =
+                              docs.map((d) => Message.fromFirestore(d)).toList();
+
+                          // Construimos una lista “mixta” con separadores
+                          final items = <_ChatItem>[];
+                          DateTime? prevTime;
+
+                          for (int i = 0; i < messages.length; i++) {
+                            final m = messages[i];
+
+                            final needsSep = _needsSeparator(m.createdAt, prevTime);
+                            if (needsSep) {
+                              items.add(_ChatItem.separator(_formatDateSeparator(m.createdAt)));
                             }
-                          });
+
+                            final prevMsg = (i > 0) ? messages[i - 1] : null;
+                            final nextMsg = (i < messages.length - 1) ? messages[i + 1] : null;
+
+                            final sameAsPrev =
+                                prevMsg != null && prevMsg.type == 'text' && m.type == 'text' &&
+                                prevMsg.authorId == m.authorId;
+
+                            final sameAsNext =
+                                nextMsg != null && nextMsg.type == 'text' && m.type == 'text' &&
+                                nextMsg.authorId == m.authorId;
+
+                            final isFirstOfGroup = !sameAsPrev;
+                            final isLastOfGroup = !sameAsNext;
+
+                            items.add(
+                              _ChatItem.message(
+                                m,
+                                isFirstOfGroup: isFirstOfGroup,
+                                isLastOfGroup: isLastOfGroup,
+                              ),
+                            );
+
+                            prevTime = m.createdAt;
+                          }
 
                           return ListView.builder(
-                            controller: _scrollCtrl,
-                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                             itemCount: items.length,
-                            itemBuilder: (context, i) {
-                              final item = items[i];
+                            itemBuilder: (context, index) {
+                              final item = items[index];
 
-                              if (item.isSeparator) {
+                              if (item.kind == _ChatItemKind.separator) {
                                 return Padding(
                                   padding: const EdgeInsets.symmetric(vertical: 10),
                                   child: Center(
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                        vertical: 6,
+                                      ),
                                       decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.35),
-                                        borderRadius: BorderRadius.circular(12),
+                                        color: Colors.black54,
+                                        borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
                                         item.separatorText!,
-                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.white70,
+                                        ),
                                       ),
                                     ),
                                   ),
                                 );
                               }
 
-                              final m = item.message!;
-                              if (m.isSystem) {
+                              final msg = item.message!;
+                              if (msg.type == 'system') {
                                 return Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
                                   child: Center(
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                        vertical: 6,
+                                      ),
                                       decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.35),
-                                        borderRadius: BorderRadius.circular(14),
+                                        color: Colors.black54,
+                                        borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
-                                        m.text,
+                                        msg.content,
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.white70,
+                                        ),
                                         textAlign: TextAlign.center,
-                                        style: const TextStyle(color: Colors.white70, fontSize: 12),
                                       ),
                                     ),
                                   ),
                                 );
                               }
 
-                              final isMe = m.authorId == _uid;
-                              final displayName = (m.authorDisplayName?.trim().isNotEmpty ?? false)
-                                  ? m.authorDisplayName!.trim()
-                                  : 'Usuario';
+                              final isMe = uid != null && msg.authorId == uid;
+                              final name = (msg.authorDisplayName ?? 'Usuario').trim();
 
-                              // Agrupación: si el anterior es del mismo autor, no repetimos header
-                              bool showHeader = true;
-                              if (i > 0) {
-                                final prevItem = items[i - 1];
-                                if (!prevItem.isSeparator &&
-                                    prevItem.message != null &&
-                                    !prevItem.message!.isSystem &&
-                                    prevItem.message!.authorId == m.authorId) {
-                                  showHeader = false;
-                                }
-                              }
-
-                              final bubble = Container(
-                                constraints: const BoxConstraints(maxWidth: 280),
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF1C1C26),
-                                  borderRadius: BorderRadius.circular(10), // más parecido a ProjectZ
-                                  border: Border.all(color: Colors.white10),
-                                ),
-                                child: Text(
-                                  m.text,
-                                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                                ),
+                              return _MessageGroupBubble(
+                                isMe: isMe,
+                                displayName: name.isNotEmpty ? name : 'Usuario',
+                                text: msg.content,
+                                showHeader: item.isFirstOfGroup!,
+                                showAvatar: item.isFirstOfGroup!,
+                                addBottomGap: item.isLastOfGroup!,
                               );
-
-                              final avatar = CircleAvatar(
-                                radius: 16,
-                                backgroundColor: const Color(0xFF1C1C26),
-                                child: Icon(Icons.person, color: Colors.white.withOpacity(0.85)),
-                              );
-
-                              if (isMe) {
-                                return Padding(
-                                  padding: EdgeInsets.only(top: showHeader ? 10 : 4, bottom: 4),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Flexible(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.end,
-                                          children: [
-                                            if (showHeader)
-                                              Padding(
-                                                padding: const EdgeInsets.only(right: 6, bottom: 4),
-                                                child: Text(
-                                                  displayName,
-                                                  style: const TextStyle(
-                                                    color: Colors.white70,
-                                                    fontWeight: FontWeight.w600,
-                                                    fontSize: 13,
-                                                  ),
-                                                ),
-                                              ),
-                                            bubble,
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      if (showHeader) avatar else const SizedBox(width: 32),
-                                    ],
-                                  ),
-                                );
-                              } else {
-                                return Padding(
-                                  padding: EdgeInsets.only(top: showHeader ? 10 : 4, bottom: 4),
-                                  child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (showHeader) avatar else const SizedBox(width: 32),
-                                      const SizedBox(width: 8),
-                                      Flexible(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            if (showHeader)
-                                              Padding(
-                                                padding: const EdgeInsets.only(left: 6, bottom: 4),
-                                                child: Text(
-                                                  displayName,
-                                                  style: const TextStyle(
-                                                    color: Colors.white70,
-                                                    fontWeight: FontWeight.w600,
-                                                    fontSize: 13,
-                                                  ),
-                                                ),
-                                              ),
-                                            bubble,
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              }
                             },
                           );
                         },
                       ),
                     ),
 
-                    // ---------------- BARRA “UNIRSE” si no es miembro ----------------
-                    if (!isMember)
-                      Container(
-                        margin: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF12121A),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.lock_outline, color: Colors.white70),
-                            const SizedBox(width: 10),
-                            const Expanded(
-                              child: Text(
-                                'Eres espectador. Únete para poder escribir.',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            ElevatedButton(
-                              onPressed: _loadingProfile ? null : () async => _joinRoom(),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF2A2A3A),
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                              ),
-                              child: const Text('Unirse'),
-                            ),
-                          ],
-                        ),
-                      ),
-
-                    // ---------------- INPUT + ICONOS (placeholder futuro) ----------------
-                    Container(
-                      color: const Color(0xFF0B0B0F),
-                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                    // ESPECTADOR: barra de unión + input bloqueado
+                    SafeArea(
+                      top: false,
                       child: Column(
                         children: [
-                          Row(
-                            children: [
-                              CircleAvatar(
-                                radius: 18,
-                                backgroundColor: const Color(0xFF1C1C26),
-                                child: Icon(Icons.person, color: Colors.white.withOpacity(0.85)),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF12121A),
-                                    borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(color: Colors.white10),
-                                  ),
-                                  child: TextField(
-                                    controller: _textCtrl,
-                                    enabled: isMember,
-                                    style: const TextStyle(color: Colors.white),
-                                    decoration: InputDecoration(
-                                      hintText: 'Escribe tu mensaje...',
-                                      hintStyle: const TextStyle(color: Colors.white38),
-                                      border: InputBorder.none,
-                                      suffixIcon: Padding(
-                                        padding: const EdgeInsets.only(right: 6),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                              decoration: BoxDecoration(
-                                                color: const Color(0xFF1C1C26),
-                                                borderRadius: BorderRadius.circular(10),
-                                                border: Border.all(color: Colors.white10),
-                                              ),
-                                              child: const Text('A+', style: TextStyle(color: Colors.white70)),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            IconButton(
-                                              onPressed: () => _sendMessage(isMember),
-                                              icon: const Icon(Icons.send, color: Colors.white70),
-                                            ),
-                                          ],
-                                        ),
+                          if (!isMember)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.lock_outline, size: 18, color: Colors.white70),
+                                    const SizedBox(width: 10),
+                                    const Expanded(
+                                      child: Text(
+                                        'Eres espectador. Únete para poder escribir.',
+                                        style: TextStyle(color: Colors.white70),
                                       ),
                                     ),
-                                    onSubmitted: (_) => _sendMessage(isMember),
-                                  ),
+                                    ElevatedButton(
+                                      onPressed: _joinRoom,
+                                      child: const Text('Unirse'),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          // Fila de iconos reservada (placeholder futuro)
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: const [
-                              Icon(Icons.graphic_eq, color: Colors.white54),
-                              Icon(Icons.image_outlined, color: Colors.white54),
-                              Icon(Icons.emoji_emotions_outlined, color: Colors.white54),
-                              Icon(Icons.auto_awesome_outlined, color: Colors.white54),
-                              Icon(Icons.casino_outlined, color: Colors.white54),
-                              Icon(Icons.add, color: Colors.white54),
-                            ],
+                            ),
+
+                          _ChatInputBar(
+                            controller: _controller,
+                            enabled: isMember,
+                            onSend: () => _sendMessage(isMember: isMember),
                           ),
                         ],
                       ),
                     ),
                   ],
-                );
-              },
+                ),
+              ),
             );
           },
+        );
+      },
+    );
+  }
+
+  Widget _memberAvatar({required double left}) {
+    return Positioned(
+      left: left,
+      child: Container(
+        width: 28,
+        height: 28,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.black87,
+          border: Border.all(color: Colors.black, width: 2),
+        ),
+        child: const CircleAvatar(
+          backgroundColor: Colors.white10,
+          child: Icon(Icons.person, size: 16, color: Colors.white70),
         ),
       ),
     );
   }
+}
+
+class _ChatInputBar extends StatelessWidget {
+  final TextEditingController controller;
+  final bool enabled;
+  final VoidCallback onSend;
+
+  const _ChatInputBar({
+    required this.controller,
+    required this.enabled,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+      child: Column(
+        children: [
+          // fila de iconos (reservada)
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: const [
+              _ActionIcon(Icons.graphic_eq),
+              _ActionIcon(Icons.image_outlined),
+              _ActionIcon(Icons.emoji_emotions_outlined),
+              _ActionIcon(Icons.auto_awesome_outlined),
+              _ActionIcon(Icons.casino_outlined),
+              _ActionIcon(Icons.add),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const CircleAvatar(
+                backgroundColor: Colors.white10,
+                child: Icon(Icons.person, color: Colors.white70),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Container(
+                  height: 44,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white10,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: TextField(
+                    controller: controller,
+                    enabled: enabled,
+                    decoration: const InputDecoration(
+                      hintText: 'Escribe tu mensaje...',
+                      border: InputBorder.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                height: 44,
+                width: 46,
+                decoration: BoxDecoration(
+                  color: enabled ? Colors.white10 : Colors.white12,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.send),
+                  onPressed: enabled ? onSend : null,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionIcon extends StatelessWidget {
+  final IconData icon;
+  const _ActionIcon(this.icon);
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 40,
+      height: 34,
+      child: Center(
+        child: Icon(icon, color: Colors.white70, size: 22),
+      ),
+    );
+  }
+}
+
+class _MessageGroupBubble extends StatelessWidget {
+  final bool isMe;
+  final String displayName;
+  final String text;
+
+  final bool showHeader;
+  final bool showAvatar;
+  final bool addBottomGap;
+
+  const _MessageGroupBubble({
+    required this.isMe,
+    required this.displayName,
+    required this.text,
+    required this.showHeader,
+    required this.showAvatar,
+    required this.addBottomGap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bubbleColor = Colors.white10;
+
+    final align = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final rowAlign = isMe ? MainAxisAlignment.end : MainAxisAlignment.start;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: addBottomGap ? 14 : 6),
+      child: Row(
+        mainAxisAlignment: rowAlign,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!isMe && showAvatar) ...[
+            const CircleAvatar(
+              backgroundColor: Colors.white10,
+              child: Icon(Icons.person, color: Colors.white70),
+            ),
+            const SizedBox(width: 10),
+          ] else if (!isMe) ...[
+            const SizedBox(width: 40),
+            const SizedBox(width: 10),
+          ],
+
+          Flexible(
+            child: Column(
+              crossAxisAlignment: align,
+              children: [
+                if (showHeader)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      displayName,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: bubbleColor,
+                    borderRadius: BorderRadius.circular(14), // “menos redondo”
+                  ),
+                  child: Text(text),
+                ),
+              ],
+            ),
+          ),
+
+          if (isMe && showAvatar) ...[
+            const SizedBox(width: 10),
+            const CircleAvatar(
+              backgroundColor: Colors.white10,
+              child: Icon(Icons.person, color: Colors.white70),
+            ),
+          ] else if (isMe) ...[
+            const SizedBox(width: 10),
+            const SizedBox(width: 40),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+enum _ChatItemKind { separator, message }
+
+class _ChatItem {
+  final _ChatItemKind kind;
+  final String? separatorText;
+
+  final Message? message;
+  final bool? isFirstOfGroup;
+  final bool? isLastOfGroup;
+
+  _ChatItem.separator(this.separatorText)
+      : kind = _ChatItemKind.separator,
+        message = null,
+        isFirstOfGroup = null,
+        isLastOfGroup = null;
+
+  _ChatItem.message(
+    this.message, {
+    required this.isFirstOfGroup,
+    required this.isLastOfGroup,
+  })  : kind = _ChatItemKind.message,
+        separatorText = null;
 }

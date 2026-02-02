@@ -1,49 +1,83 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-enum MessageType { user, system }
-
+/// Modelo único para mensajes.
+/// - Lee tanto el esquema nuevo (`text`, `authorDisplayName`)
+///   como el antiguo (`content`) por compatibilidad.
 class MessageModel {
   final String id;
-  final MessageType type;
 
-  final String? authorId;
-  final String? authorDisplayName;
+  /// 'user' | 'system' (por ahora)
+  final String type;
 
+  /// Para system puede venir vacío.
+  final String authorId;
+
+  /// Para system puede venir vacío.
+  final String authorDisplayName;
+
+  /// Texto del mensaje (equivalente a `content` antiguo)
   final String text;
+
+  /// Fecha estimada (si llega null por serverTimestamp pendiente)
   final DateTime createdAt;
 
-  const MessageModel({
+  MessageModel({
     required this.id,
     required this.type,
+    required this.authorId,
+    required this.authorDisplayName,
     required this.text,
     required this.createdAt,
-    this.authorId,
-    this.authorDisplayName,
   });
 
-  bool get isSystem => type == MessageType.system;
+  /// Compatibilidad con código viejo que usaba `content`.
+  String get content => text;
 
-  static MessageType _parseType(dynamic v) {
-    final s = (v ?? 'user').toString();
-    return s == 'system' ? MessageType.system : MessageType.user;
+  bool get isSystem => type == 'system';
+
+  static DateTime _parseCreatedAt(dynamic raw) {
+    if (raw is Timestamp) return raw.toDate();
+    // Si aún no ha resuelto serverTimestamp, evitamos nulls.
+    return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
-  static DateTime _parseDate(dynamic v) {
-    if (v is Timestamp) return v.toDate();
-    if (v is DateTime) return v;
-    // Cuando aún no ha llegado serverTimestamp:
-    return DateTime.now();
-  }
+  static MessageModel _from(String id, Map<String, dynamic> data) {
+    final type = (data['type'] as String?)?.trim();
+    final authorId = (data['authorId'] as String?)?.trim();
+    final authorDisplayName =
+        (data['authorDisplayName'] as String?)?.trim() ??
+        (data['displayName'] as String?)?.trim(); // fallback
 
-  factory MessageModel.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? <String, dynamic>{};
+    final text =
+        (data['text'] as String?) ??
+        (data['content'] as String?) ?? // fallback esquema antiguo
+        '';
+
+    final createdAt = _parseCreatedAt(data['createdAt']);
+
     return MessageModel(
-      id: doc.id,
-      type: _parseType(data['type']),
-      authorId: data['authorId']?.toString(),
-      authorDisplayName: data['authorDisplayName']?.toString(),
-      text: (data['text'] ?? '').toString(),
-      createdAt: _parseDate(data['createdAt']),
+      id: id,
+      type: (type == null || type.isEmpty) ? 'user' : type,
+      authorId: authorId ?? '',
+      authorDisplayName: authorDisplayName ?? '',
+      text: text,
+      createdAt: createdAt,
     );
   }
+
+  factory MessageModel.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    return _from(doc.id, doc.data());
+  }
+
+  factory MessageModel.fromFirestore(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data() ?? <String, dynamic>{};
+    return _from(doc.id, data);
+  }
 }
+
+/// Alias para no romper imports/código antiguo que usa `Message`.
+typedef Message = MessageModel;
