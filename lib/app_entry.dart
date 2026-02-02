@@ -5,7 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'features/auth/login_screen.dart';
 import 'features/auth/create_profile_screen.dart';
 import 'features/auth/banned_screen.dart';
-import 'features/rooms/room_list_screen.dart';
+import 'features/home/home_shell.dart';
 
 class AppEntry extends StatelessWidget {
   const AppEntry({super.key});
@@ -173,7 +173,7 @@ class _UserGateState extends State<_UserGate> {
               return const CreateProfileScreen();
             }
 
-            return RoomListScreen();
+            return const HomeShell();
           },
         );
       },
