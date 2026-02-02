@@ -17,7 +17,6 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _roomsService = RoomsService();
-
   final TextEditingController _controller = TextEditingController();
 
   late final DocumentReference<Map<String, dynamic>> _roomRef;
@@ -28,10 +27,8 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-
     _roomRef = FirebaseFirestore.instance.collection('rooms').doc(widget.room.id);
     _messagesRef = _roomRef.collection('messages');
-
     _loadMyProfileSnapshot();
   }
 
@@ -39,15 +36,31 @@ class _ChatScreenState extends State<ChatScreen> {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
 
-    final snap =
-        await FirebaseFirestore.instance.collection('users').doc(uid).get();
-
+    final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
     final data = snap.data();
     if (!mounted) return;
 
     setState(() {
       _myDisplayName = (data?['displayName'] as String?)?.trim();
     });
+  }
+
+  Future<void> _safeUpdateRoomActivity({
+    String? lastMessageText,
+    required FieldValue now,
+  }) async {
+    // “Best effort”: si reglas no permiten tocar rooms/{id}, NO rompemos el envío.
+    try {
+      final patch = <String, dynamic>{'lastActivityAt': now};
+      if (lastMessageText != null) {
+        patch['lastMessageText'] = lastMessageText;
+        patch['lastMessageAt'] = now;
+      }
+      await _roomRef.set(patch, SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied') return;
+      rethrow;
+    }
   }
 
   Future<void> _sendMessage({required bool isMember}) async {
@@ -66,26 +79,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final now = FieldValue.serverTimestamp();
 
-    // 1) Crear el mensaje
-    // 2) Actualizar "último mensaje" de la sala (para el listado)
-    final batch = FirebaseFirestore.instance.batch();
-
-    final msgRef = _messagesRef.doc();
-    batch.set(msgRef, {
-      'type': 'text',
+    // 1) Guardamos SIEMPRE el mensaje con el ESQUEMA CORRECTO
+    await _messagesRef.add({
+      'type': 'user',
       'authorId': user.uid,
       'authorDisplayName': safeName,
-      'content': text,
+      'text': text,
       'createdAt': now,
     });
 
-    batch.set(_roomRef, {
-      'lastMessageText': text,
-      'lastMessageAt': now,
-      'lastActivityAt': now,
-    }, SetOptions(merge: true));
-
-    await batch.commit();
+    // 2) Actualizamos resumen sala (opcional)
+    await _safeUpdateRoomActivity(lastMessageText: text, now: now);
   }
 
   Future<void> _joinRoom() async {
@@ -94,39 +98,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
     await _roomsService.joinRoom(roomId: widget.room.id, uid: user.uid);
 
-    // Mensaje de sistema opcional (no depende de ser miembro por reglas)
     final name = (_myDisplayName ?? '').trim();
     final safeName = name.isNotEmpty ? name : 'Usuario';
 
+    // Mensaje system con ESQUEMA CORRECTO
     await _messagesRef.add({
       'type': 'system',
-      'authorId': null,
-      'authorDisplayName': null,
-      'content': '$safeName se ha unido a esta sala.',
+      'authorId': '',
+      'authorDisplayName': '',
+      'text': '$safeName se ha unido a esta sala.',
       'createdAt': FieldValue.serverTimestamp(),
     });
 
-    // También actualizamos última actividad
-    await _roomRef.set(
-      {'lastActivityAt': FieldValue.serverTimestamp()},
-      SetOptions(merge: true),
-    );
-  }
-
-  String _formatRelative(DateTime? dt) {
-    if (dt == null) return '';
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-
-    if (diff.inMinutes < 1) return 'Ahora';
-    if (diff.inMinutes < 60) return 'Hace ${diff.inMinutes} min';
-    if (diff.inHours < 24) return 'Hace ${diff.inHours} h';
-    if (diff.inDays == 1) return 'Ayer';
-    if (diff.inDays < 7) return 'Hace ${diff.inDays} días';
-
-    final dd = dt.day.toString().padLeft(2, '0');
-    final mm = dt.month.toString().padLeft(2, '0');
-    return '$dd/$mm';
+    await _safeUpdateRoomActivity(lastMessageText: null, now: FieldValue.serverTimestamp());
   }
 
   String _formatDateSeparator(DateTime dt) {
@@ -146,14 +130,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _needsSeparator(DateTime current, DateTime? previous) {
     if (previous == null) return true;
-    final diff = current.difference(previous);
 
-    // separador si cambia el día o si hay gap >= 3h
+    final diff = current.difference(previous);
     final dayChanged = current.year != previous.year ||
         current.month != previous.month ||
         current.day != previous.day;
 
     return dayChanged || diff.inHours >= 3;
+  }
+
+  String _groupKey(Message msg) {
+    final aId = msg.authorId.trim();
+    if (aId.isNotEmpty) return aId;
+    final aName = msg.authorDisplayName.trim();
+    if (aName.isNotEmpty) return aName;
+    return 'unknown';
   }
 
   @override
@@ -167,9 +158,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final roomData = roomSnap.data?.data() ?? {};
         final roomName = (roomData['name'] as String?) ?? widget.room.name;
         final ownerText = '(Owner: pendiente)';
-        final memberCount = (roomData['memberCount'] is int)
-            ? roomData['memberCount'] as int
-            : 24; // fallback placeholder si no existe
+        final memberCount = (roomData['memberCount'] is int) ? roomData['memberCount'] as int : 24;
 
         return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
           stream: (uid == null)
@@ -187,7 +176,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                       child: Column(
                         children: [
-                          // Fila 1: back + img sala + nombre + owner + info
+                          // Fila 1
                           Row(
                             children: [
                               IconButton(
@@ -211,19 +200,13 @@ class _ChatScreenState extends State<ChatScreen> {
                                   children: [
                                     Text(
                                       roomName,
-                                      style: const TextStyle(
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
                                       ownerText,
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.white60,
-                                      ),
+                                      style: const TextStyle(fontSize: 12, color: Colors.white60),
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                   ],
@@ -231,7 +214,6 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                               IconButton(
                                 onPressed: () {
-                                  // placeholder info
                                   showDialog(
                                     context: context,
                                     builder: (_) => AlertDialog(
@@ -253,7 +235,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
                           const SizedBox(height: 10),
 
-                          // Fila 2: Noticias (izq) + miembros (dcha, sin borde)
+                          // Fila 2
                           Row(
                             children: [
                               Expanded(
@@ -280,8 +262,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ),
                               ),
                               const SizedBox(width: 12),
-
-                              // Bloque miembros estilo ProjectZ (avatars pisados + número)
                               SizedBox(
                                 height: 44,
                                 child: Row(
@@ -315,7 +295,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
                           const SizedBox(height: 10),
 
-                          // Fila 3: selector Roleplay (placeholder)
+                          // Fila 3
                           Container(
                             height: 46,
                             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -344,9 +324,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     // MENSAJES
                     Expanded(
                       child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                        stream: _messagesRef
-                            .orderBy('createdAt', descending: false)
-                            .snapshots(),
+                        stream: _messagesRef.orderBy('createdAt', descending: false).snapshots(),
                         builder: (context, snapshot) {
                           if (snapshot.connectionState == ConnectionState.waiting) {
                             return const Center(child: CircularProgressIndicator());
@@ -366,10 +344,8 @@ class _ChatScreenState extends State<ChatScreen> {
                             return const Center(child: Text('No hay mensajes'));
                           }
 
-                          final messages =
-                              docs.map((d) => Message.fromFirestore(d)).toList();
+                          final messages = docs.map((d) => Message.fromDoc(d)).toList();
 
-                          // Construimos una lista “mixta” con separadores
                           final items = <_ChatItem>[];
                           DateTime? prevTime;
 
@@ -384,22 +360,28 @@ class _ChatScreenState extends State<ChatScreen> {
                             final prevMsg = (i > 0) ? messages[i - 1] : null;
                             final nextMsg = (i < messages.length - 1) ? messages[i + 1] : null;
 
+                            final mKey = _groupKey(m);
+                            final prevKey = prevMsg == null ? '' : _groupKey(prevMsg);
+                            final nextKey = nextMsg == null ? '' : _groupKey(nextMsg);
+
+                            // Agrupamos SOLO mensajes de usuario
                             final sameAsPrev =
-                                prevMsg != null && prevMsg.type == 'text' && m.type == 'text' &&
-                                prevMsg.authorId == m.authorId;
+                                prevMsg != null &&
+                                prevMsg.type == 'user' &&
+                                m.type == 'user' &&
+                                mKey == prevKey;
 
                             final sameAsNext =
-                                nextMsg != null && nextMsg.type == 'text' && m.type == 'text' &&
-                                nextMsg.authorId == m.authorId;
-
-                            final isFirstOfGroup = !sameAsPrev;
-                            final isLastOfGroup = !sameAsNext;
+                                nextMsg != null &&
+                                nextMsg.type == 'user' &&
+                                m.type == 'user' &&
+                                mKey == nextKey;
 
                             items.add(
                               _ChatItem.message(
                                 m,
-                                isFirstOfGroup: isFirstOfGroup,
-                                isLastOfGroup: isLastOfGroup,
+                                isFirstOfGroup: !sameAsPrev,
+                                isLastOfGroup: !sameAsNext,
                               ),
                             );
 
@@ -417,20 +399,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                   padding: const EdgeInsets.symmetric(vertical: 10),
                                   child: Center(
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 6,
-                                      ),
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                       decoration: BoxDecoration(
                                         color: Colors.black54,
                                         borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
                                         item.separatorText!,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.white70,
-                                        ),
+                                        style: const TextStyle(fontSize: 12, color: Colors.white70),
                                       ),
                                     ),
                                   ),
@@ -443,20 +419,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                   padding: const EdgeInsets.symmetric(vertical: 8),
                                   child: Center(
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 6,
-                                      ),
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                       decoration: BoxDecoration(
                                         color: Colors.black54,
                                         borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: Text(
-                                        msg.content,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.white70,
-                                        ),
+                                        msg.text,
+                                        style: const TextStyle(fontSize: 12, color: Colors.white70),
                                         textAlign: TextAlign.center,
                                       ),
                                     ),
@@ -465,14 +435,15 @@ class _ChatScreenState extends State<ChatScreen> {
                               }
 
                               final isMe = uid != null && msg.authorId == uid;
-                              final name = (msg.authorDisplayName ?? 'Usuario').trim();
+                              final name = msg.authorDisplayName.trim().isNotEmpty
+                                  ? msg.authorDisplayName.trim()
+                                  : 'Usuario';
 
-                              return _MessageGroupBubble(
+                              return _BlockBubble(
                                 isMe: isMe,
-                                displayName: name.isNotEmpty ? name : 'Usuario',
-                                text: msg.content,
-                                showHeader: item.isFirstOfGroup!,
-                                showAvatar: item.isFirstOfGroup!,
+                                displayName: name,
+                                text: msg.text,
+                                showHeaderAndAvatar: item.isFirstOfGroup!,
                                 addBottomGap: item.isLastOfGroup!,
                               );
                             },
@@ -481,45 +452,18 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
 
-                    // ESPECTADOR: barra de unión + input bloqueado
+                    // BARRA INFERIOR
                     SafeArea(
                       top: false,
-                      child: Column(
-                        children: [
-                          if (!isMember)
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white10,
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(Icons.lock_outline, size: 18, color: Colors.white70),
-                                    const SizedBox(width: 10),
-                                    const Expanded(
-                                      child: Text(
-                                        'Eres espectador. Únete para poder escribir.',
-                                        style: TextStyle(color: Colors.white70),
-                                      ),
-                                    ),
-                                    ElevatedButton(
-                                      onPressed: _joinRoom,
-                                      child: const Text('Unirse'),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-
-                          _ChatInputBar(
-                            controller: _controller,
-                            enabled: isMember,
-                            onSend: () => _sendMessage(isMember: isMember),
-                          ),
-                        ],
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+                        child: isMember
+                            ? _ChatInputBar(
+                                controller: _controller,
+                                enabled: true,
+                                onSend: () => _sendMessage(isMember: true),
+                              )
+                            : _JoinChatBar(onJoin: _joinRoom),
                       ),
                     ),
                   ],
@@ -552,6 +496,30 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
+class _JoinChatBar extends StatelessWidget {
+  final VoidCallback onJoin;
+
+  const _JoinChatBar({required this.onJoin});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 54,
+      width: double.infinity,
+      child: ElevatedButton(
+        onPressed: onJoin,
+        style: ElevatedButton.styleFrom(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        ),
+        child: const Text(
+          'Unirse al chat',
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+}
+
 class _ChatInputBar extends StatelessWidget {
   final TextEditingController controller;
   final bool enabled;
@@ -565,65 +533,63 @@ class _ChatInputBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
-      child: Column(
-        children: [
-          // fila de iconos (reservada)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: const [
-              _ActionIcon(Icons.graphic_eq),
-              _ActionIcon(Icons.image_outlined),
-              _ActionIcon(Icons.emoji_emotions_outlined),
-              _ActionIcon(Icons.auto_awesome_outlined),
-              _ActionIcon(Icons.casino_outlined),
-              _ActionIcon(Icons.add),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const CircleAvatar(
-                backgroundColor: Colors.white10,
-                child: Icon(Icons.person, color: Colors.white70),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Container(
-                  height: 44,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white10,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: TextField(
-                    controller: controller,
-                    enabled: enabled,
-                    decoration: const InputDecoration(
-                      hintText: 'Escribe tu mensaje...',
-                      border: InputBorder.none,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
+    return Column(
+      children: [
+        // Iconos ARRIBA
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: const [
+            _ActionIcon(Icons.graphic_eq),
+            _ActionIcon(Icons.image_outlined),
+            _ActionIcon(Icons.emoji_emotions_outlined),
+            _ActionIcon(Icons.auto_awesome_outlined),
+            _ActionIcon(Icons.casino_outlined),
+            _ActionIcon(Icons.add),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        Row(
+          children: [
+            const CircleAvatar(
+              backgroundColor: Colors.white10,
+              child: Icon(Icons.person, color: Colors.white70),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Container(
                 height: 44,
-                width: 46,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
                 decoration: BoxDecoration(
-                  color: enabled ? Colors.white10 : Colors.white12,
+                  color: Colors.white10,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: enabled ? onSend : null,
+                child: TextField(
+                  controller: controller,
+                  enabled: enabled,
+                  decoration: const InputDecoration(
+                    hintText: 'Escribe tu mensaje...',
+                    border: InputBorder.none,
+                  ),
                 ),
               ),
-            ],
-          ),
-        ],
-      ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              height: 44,
+              width: 46,
+              decoration: BoxDecoration(
+                color: Colors.white10,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: IconButton(
+                icon: const Icon(Icons.send),
+                onPressed: enabled ? onSend : null,
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -644,30 +610,32 @@ class _ActionIcon extends StatelessWidget {
   }
 }
 
-class _MessageGroupBubble extends StatelessWidget {
+/// Bloque estilo ProjectZ (como tu 2ª imagen):
+/// - Nombre (Usuario/Kyrox) SOLO al inicio del grupo
+/// - Avatar SOLO al inicio del grupo
+/// - Burbujas compactas, poco redondeo
+class _BlockBubble extends StatelessWidget {
   final bool isMe;
   final String displayName;
   final String text;
 
-  final bool showHeader;
-  final bool showAvatar;
+  final bool showHeaderAndAvatar;
   final bool addBottomGap;
 
-  const _MessageGroupBubble({
+  const _BlockBubble({
     required this.isMe,
     required this.displayName,
     required this.text,
-    required this.showHeader,
-    required this.showAvatar,
+    required this.showHeaderAndAvatar,
     required this.addBottomGap,
   });
 
   @override
   Widget build(BuildContext context) {
     final bubbleColor = Colors.white10;
-
-    final align = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final rowAlign = isMe ? MainAxisAlignment.end : MainAxisAlignment.start;
+
+    final radius = BorderRadius.circular(12);
 
     return Padding(
       padding: EdgeInsets.only(bottom: addBottomGap ? 14 : 6),
@@ -675,7 +643,8 @@ class _MessageGroupBubble extends StatelessWidget {
         mainAxisAlignment: rowAlign,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isMe && showAvatar) ...[
+          // IZQ: avatar o hueco
+          if (!isMe && showHeaderAndAvatar) ...[
             const CircleAvatar(
               backgroundColor: Colors.white10,
               child: Icon(Icons.person, color: Colors.white70),
@@ -686,11 +655,12 @@ class _MessageGroupBubble extends StatelessWidget {
             const SizedBox(width: 10),
           ],
 
+          // Columna (nombre + burbuja)
           Flexible(
             child: Column(
-              crossAxisAlignment: align,
+              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
-                if (showHeader)
+                if (showHeaderAndAvatar)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(
@@ -701,19 +671,23 @@ class _MessageGroupBubble extends StatelessWidget {
                       ),
                     ),
                   ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: bubbleColor,
-                    borderRadius: BorderRadius.circular(14), // “menos redondo”
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: bubbleColor,
+                      borderRadius: radius,
+                    ),
+                    child: Text(text),
                   ),
-                  child: Text(text),
                 ),
               ],
             ),
           ),
 
-          if (isMe && showAvatar) ...[
+          // DCHA: avatar o hueco
+          if (isMe && showHeaderAndAvatar) ...[
             const SizedBox(width: 10),
             const CircleAvatar(
               backgroundColor: Colors.white10,
