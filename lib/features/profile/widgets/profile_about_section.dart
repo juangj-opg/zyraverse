@@ -19,60 +19,49 @@ class _ProfileAboutSectionState extends State<ProfileAboutSection> {
   Widget build(BuildContext context) {
     final bio = widget.bio;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Sobre mí',
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(height: 10),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.06),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: const [
-                  Icon(Icons.subject, color: Colors.white70, size: 18),
-                  SizedBox(width: 8),
-                  Text(
-                    'Bio',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              if (bio == null)
-                const Text(
-                  'Sin bio',
-                  style: TextStyle(
-                    color: Colors.white60,
-                    fontWeight: FontWeight.w600,
-                  ),
-                )
-              else
-                _BioText(
-                  text: bio,
-                  expanded: _expanded,
-                  onToggle: () => setState(() => _expanded = !_expanded),
+    // OJO: El título "Sobre mí" ahora va anclado (pinned) en el ProfileScreen
+    // para replicar el comportamiento de ProjectZ.
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.subject, color: Colors.white70, size: 18),
+              SizedBox(width: 8),
+              Text(
+                'Bio',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
                 ),
+              ),
             ],
           ),
-        ),
-      ],
+          const SizedBox(height: 10),
+          if (bio == null)
+            const Text(
+              'Sin bio',
+              style: TextStyle(
+                color: Colors.white60,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+          else
+            _BioText(
+              text: bio,
+              expanded: _expanded,
+              onToggle: () => setState(() => _expanded = !_expanded),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -89,7 +78,7 @@ class _BioText extends StatelessWidget {
   final VoidCallback onToggle;
 
   bool _shouldShowToggle(String text) {
-    // Heurística simple para decidir si merece toggle (similar a lo que ya tenías):
+    // Heurística simple:
     final lineBreaks = '\n'.allMatches(text).length;
     return lineBreaks >= 5 || text.length > 220;
   }

@@ -5,14 +5,6 @@ import 'package:flutter/material.dart';
 import 'widgets/profile_about_section.dart';
 import 'widgets/profile_collapsing_header.dart';
 
-/// Pantalla estilo ProjectZ para ver un perfil.
-/// - Misma vista para "mi perfil" y "perfil de otra persona".
-/// - Por privacidad: NO se usa la foto de Google. Siempre placeholder.
-///
-/// Importante (comportamiento ProjectZ):
-/// - La barra superior (flecha + "...") siempre está.
-/// - El título reducido (mini avatar + nombre) SOLO aparece cuando "Sobre mí"
-///   llega arriba del todo.
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
     super.key,
@@ -27,7 +19,10 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   final ScrollController _scrollController = ScrollController();
-  final GlobalKey _aboutKey = GlobalKey();
+
+  // ✅ La key debe estar en el HEADER "Sobre mí" (el pinned),
+  // no dentro del contenido, porque es lo que queremos “detectar” cuando llega arriba.
+  final GlobalKey _aboutHeaderKey = GlobalKey();
 
   bool _showCollapsedTitle = false;
 
@@ -36,7 +31,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.initState();
     _scrollController.addListener(_onScroll);
 
-    // Primera medición tras el primer layout.
     WidgetsBinding.instance.addPostFrameCallback((_) => _updateCollapsedTitle());
   }
 
@@ -47,22 +41,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.dispose();
   }
 
-  void _onScroll() {
-    _updateCollapsedTitle();
-  }
+  void _onScroll() => _updateCollapsedTitle();
 
   void _updateCollapsedTitle() {
-    final ctx = _aboutKey.currentContext;
+    if (!mounted) return;
+
+    final ctx = _aboutHeaderKey.currentContext;
     if (ctx == null) return;
 
-    final box = ctx.findRenderObject();
-    if (box is! RenderBox) return;
+    final obj = ctx.findRenderObject();
+    if (obj is! RenderBox) return;
 
-    // Posición del inicio del bloque "Sobre mí".
-    final dy = box.localToGlobal(Offset.zero).dy;
+    // Posición global del header "Sobre mí"
+    final dy = obj.localToGlobal(Offset.zero).dy;
 
-    // Como el body está dentro de SafeArea, el SliverAppBar pinned se queda en kToolbarHeight.
-    final threshold = kToolbarHeight + 2;
+    // ✅ Umbral correcto en iOS (notch): SafeArea desplaza el contenido,
+    // así que hay que sumar el padding superior real.
+    final topPadding = MediaQuery.of(context).padding.top;
+    final threshold = topPadding + kToolbarHeight + 2;
 
     final shouldShow = dy <= threshold;
     if (shouldShow != _showCollapsedTitle) {
@@ -97,7 +93,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ? '@$username'
                 : '@---';
 
-            // Recalcular tras rebuilds de stream (por si cambia altura/posiciones).
+            // Recalcular tras rebuilds del stream.
             WidgetsBinding.instance
                 .addPostFrameCallback((_) => _updateCollapsedTitle());
 
@@ -110,20 +106,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   isMe: isMe,
                   showCollapsedTitle: _showCollapsedTitle,
                 ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 10)),
+
+                // ✅ "Sobre mí" ANCLADO (pinned) estilo ProjectZ
+                SliverPersistentHeader(
+                  pinned: true,
+                  delegate: _PinnedSectionHeaderDelegate(
+                    child: KeyedSubtree(
+                      key: _aboutHeaderKey,
+                      child: const _PinnedSectionHeader(title: 'Sobre mí'),
+                    ),
+                  ),
+                ),
+
+                // Contenido de "Sobre mí" (Bio card)
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Key del bloque "Sobre mí" para saber cuándo toca arriba.
-                        KeyedSubtree(
-                          key: _aboutKey,
-                          child: ProfileAboutSection(
-                            bio: (bio != null && bio.isNotEmpty) ? bio : null,
-                          ),
-                        ),
-                      ],
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+                    child: ProfileAboutSection(
+                      bio: (bio != null && bio.isNotEmpty) ? bio : null,
                     ),
                   ),
                 ),
@@ -133,5 +135,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
       ),
     );
+  }
+}
+
+class _PinnedSectionHeader extends StatelessWidget {
+  const _PinnedSectionHeader({
+    required this.title,
+  });
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    // Fondo opaco para que el contenido pase por detrás y se lea perfecto.
+    return Container(
+      height: 48,
+      alignment: Alignment.centerLeft,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      color: Colors.black.withOpacity(0.90),
+      child: Text(
+        title,
+        style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
+
+class _PinnedSectionHeaderDelegate extends SliverPersistentHeaderDelegate {
+  _PinnedSectionHeaderDelegate({
+    required this.child,
+  });
+
+  final Widget child;
+
+  @override
+  double get minExtent => 48;
+
+  @override
+  double get maxExtent => 48;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    return child;
+  }
+
+  @override
+  bool shouldRebuild(covariant _PinnedSectionHeaderDelegate oldDelegate) {
+    return oldDelegate.child != child;
   }
 }
