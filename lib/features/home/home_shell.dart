@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../core/services/rooms_service.dart';
 import '../rooms/room_list_screen.dart';
 import 'discover_screen.dart';
+import '../profile/profile_screen.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -88,10 +89,20 @@ class _HomeHeader extends StatelessWidget {
 
           return Row(
             children: [
-              const CircleAvatar(
-                radius: 20,
-                backgroundColor: Colors.white10,
-                child: Icon(Icons.person, color: Colors.white70),
+              GestureDetector(
+                onTap: () {
+                  // Perfil (placeholder: sin edición todavía)
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ProfileScreen(profileUid: uid!),
+                    ),
+                  );
+                },
+                child: const CircleAvatar(
+                  radius: 20,
+                  backgroundColor: Colors.white10,
+                  child: Icon(Icons.person, color: Colors.white70),
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
