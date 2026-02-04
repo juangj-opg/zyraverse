@@ -67,7 +67,7 @@ class _ProfileAboutSectionState extends State<ProfileAboutSection> {
                 _BioText(
                   text: bio,
                   expanded: _expanded,
-                  onExpand: () => setState(() => _expanded = true),
+                  onToggle: () => setState(() => _expanded = !_expanded),
                 ),
             ],
           ),
@@ -81,22 +81,22 @@ class _BioText extends StatelessWidget {
   const _BioText({
     required this.text,
     required this.expanded,
-    required this.onExpand,
+    required this.onToggle,
   });
 
   final String text;
   final bool expanded;
-  final VoidCallback onExpand;
+  final VoidCallback onToggle;
 
-  bool _shouldShowMore(String text) {
-    // Heurística simple (sin medir layout): si hay muchas líneas o mucho texto.
+  bool _shouldShowToggle(String text) {
+    // Heurística simple para decidir si merece toggle (similar a lo que ya tenías):
     final lineBreaks = '\n'.allMatches(text).length;
     return lineBreaks >= 5 || text.length > 220;
   }
 
   @override
   Widget build(BuildContext context) {
-    final showMore = !expanded && _shouldShowMore(text);
+    final canToggle = _shouldShowToggle(text);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -111,64 +111,13 @@ class _BioText extends StatelessWidget {
             fontWeight: FontWeight.w600,
           ),
         ),
-        if (showMore) ...[
+        if (canToggle) ...[
           const SizedBox(height: 10),
           GestureDetector(
-            onTap: () {
-              // Modal con todo el texto (estilo "Ver todo")
-              showModalBottomSheet(
-                context: context,
-                backgroundColor: const Color(0xFF121218),
-                shape: const RoundedRectangleBorder(
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-                ),
-                builder: (_) {
-                  return SafeArea(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              const Text(
-                                'Bio',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              const Spacer(),
-                              IconButton(
-                                onPressed: () => Navigator.of(context).pop(),
-                                icon: const Icon(Icons.close),
-                              )
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Flexible(
-                            child: SingleChildScrollView(
-                              child: Text(
-                                text,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  height: 1.25,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              );
-            },
-            child: const Text(
-              'Ver todo',
-              style: TextStyle(
+            onTap: onToggle,
+            child: Text(
+              expanded ? 'Ver menos' : 'Ver todo',
+              style: const TextStyle(
                 color: Colors.lightBlueAccent,
                 fontWeight: FontWeight.w700,
               ),

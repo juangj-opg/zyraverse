@@ -11,11 +11,13 @@ class ProfileCollapsingHeader extends StatelessWidget {
     required this.displayName,
     required this.username,
     required this.isMe,
+    required this.showCollapsedTitle,
   });
 
   final String displayName;
   final String username;
   final bool isMe;
+  final bool showCollapsedTitle;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +44,15 @@ class ProfileCollapsingHeader extends StatelessWidget {
         ),
       ],
       titleSpacing: 0,
-      title: _CollapsedTitle(displayName: displayName),
+      title: AnimatedOpacity(
+        duration: const Duration(milliseconds: 140),
+        curve: Curves.easeOut,
+        opacity: showCollapsedTitle ? 1 : 0,
+        child: IgnorePointer(
+          ignoring: !showCollapsedTitle,
+          child: _CollapsedTitle(displayName: displayName),
+        ),
+      ),
       flexibleSpace: LayoutBuilder(
         builder: (context, constraints) {
           // Cuando la AppBar se colapsa, el alto se acerca a (kToolbarHeight + topPadding)
@@ -94,7 +104,8 @@ class ProfileCollapsingHeader extends StatelessWidget {
                         const CircleAvatar(
                           radius: 42,
                           backgroundColor: Colors.white10,
-                          child: Icon(Icons.person, size: 42, color: Colors.white70),
+                          child: Icon(Icons.person,
+                              size: 42, color: Colors.white70),
                         ),
                         const SizedBox(height: 12),
                         Padding(
