@@ -129,7 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final roomData = roomSnap.data?.data() ?? {};
 
         final roomName = (roomData['name'] as String?) ?? widget.room.name;
-        final ownerText = '(Owner: pendiente)';
+        final ownerUid = (roomData['ownerUid'] as String?)?.trim();
 
         final memberCount = (roomData['memberCount'] is int)
             ? roomData['memberCount'] as int
@@ -142,28 +142,52 @@ class _ChatScreenState extends State<ChatScreen> {
           builder: (context, memberSnap) {
             final isMember = memberSnap.data?.exists == true;
 
+            // Owner lookup (B): tiramos de /users/{ownerUid}. Si no existe o es null, mostramos '---'.
+            final Stream<DocumentSnapshot<Map<String, dynamic>>>? ownerStream =
+                (ownerUid == null || ownerUid.isEmpty)
+                    ? null
+                    : FirebaseFirestore.instance.collection('users').doc(ownerUid).snapshots();
+
             return Scaffold(
               body: SafeArea(
                 child: Column(
                   children: [
-                    HeaderRoom(
-                      roomName: roomName,
-                      ownerText: ownerText,
-                      memberCount: memberCount,
-                      onBack: () => Navigator.pop(context),
-                      onInfo: () {
-                        showDialog(
-                          context: context,
-                          builder: (_) => AlertDialog(
-                            title: const Text('Info'),
-                            content: const Text('Pendiente de implementar.'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context),
-                                child: const Text('OK'),
+                    StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                      stream: ownerStream,
+                      builder: (context, ownerSnap) {
+                        String ownerDisplayName = '---';
+                        String? ownerPhotoUrl;
+
+                        if (ownerUid != null && ownerUid.isNotEmpty) {
+                          final data = ownerSnap.data?.data();
+                          if (ownerSnap.data?.exists == true && data != null) {
+                            final dn = (data['displayName'] as String?)?.trim();
+                            ownerDisplayName = (dn != null && dn.isNotEmpty) ? dn : '---';
+                            ownerPhotoUrl = (data['photoURL'] as String?)?.trim();
+                          }
+                        }
+
+                        return HeaderRoom(
+                          roomName: roomName,
+                          ownerDisplayName: ownerDisplayName,
+                          ownerPhotoUrl: ownerPhotoUrl,
+                          memberCount: memberCount,
+                          onBack: () => Navigator.pop(context),
+                          onInfo: () {
+                            showDialog(
+                              context: context,
+                              builder: (_) => AlertDialog(
+                                title: const Text('Info'),
+                                content: const Text('Pendiente de implementar.'),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: const Text('OK'),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
+                            );
+                          },
                         );
                       },
                     ),

@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 /// flecha + imagen placeholder + titulo + owner + icono info
 class HeaderRoomHeader extends StatelessWidget {
   final String roomName;
-  final String ownerText;
+  final String ownerDisplayName;
+  final String? ownerPhotoUrl;
 
   final VoidCallback onBack;
   final VoidCallback onInfo;
@@ -12,10 +13,45 @@ class HeaderRoomHeader extends StatelessWidget {
   const HeaderRoomHeader({
     super.key,
     required this.roomName,
-    required this.ownerText,
+    required this.ownerDisplayName,
+    required this.ownerPhotoUrl,
     required this.onBack,
     required this.onInfo,
   });
+
+  Widget _ownerAvatar() {
+    final url = (ownerPhotoUrl ?? '').trim();
+
+    Widget fallback() {
+      return Container(
+        width: 16,
+        height: 16,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white10,
+        ),
+        child: const Center(
+          child: Icon(
+            Icons.person,
+            size: 12,
+            color: Colors.white60,
+          ),
+        ),
+      );
+    }
+
+    if (url.isEmpty) return fallback();
+
+    return ClipOval(
+      child: Image.network(
+        url,
+        width: 16,
+        height: 16,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => fallback(),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -49,13 +85,21 @@ class HeaderRoomHeader extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
               const SizedBox(height: 2),
-              Text(
-                ownerText,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Colors.white60,
-                ),
-                overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  _ownerAvatar(),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      ownerDisplayName,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white60,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

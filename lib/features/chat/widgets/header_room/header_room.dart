@@ -8,7 +8,8 @@ import 'header_room_info.dart';
 /// - infoRoom (noticias + miembros + selector roleplay)
 class HeaderRoom extends StatelessWidget {
   final String roomName;
-  final String ownerText;
+  final String ownerDisplayName;
+  final String? ownerPhotoUrl;
   final int memberCount;
 
   final VoidCallback onBack;
@@ -17,7 +18,8 @@ class HeaderRoom extends StatelessWidget {
   const HeaderRoom({
     super.key,
     required this.roomName,
-    required this.ownerText,
+    required this.ownerDisplayName,
+    required this.ownerPhotoUrl,
     required this.memberCount,
     required this.onBack,
     required this.onInfo,
@@ -31,7 +33,8 @@ class HeaderRoom extends StatelessWidget {
         children: [
           HeaderRoomHeader(
             roomName: roomName,
-            ownerText: ownerText,
+            ownerDisplayName: ownerDisplayName,
+            ownerPhotoUrl: ownerPhotoUrl,
             onBack: onBack,
             onInfo: onInfo,
           ),
