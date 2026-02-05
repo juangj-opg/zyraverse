@@ -60,14 +60,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     final offset = _scrollController.offset;
 
-    // ✅ Regla absoluta: si estás arriba del todo (o sobre-scroll), nunca mostramos el colapsado.
     if (offset <= 1.0) {
       _setCollapsedTitle(false);
       return;
     }
 
     final topPadding = MediaQuery.of(context).padding.top;
-    final collapseDistance = _expandedHeaderHeight - (kToolbarHeight + topPadding);
+    final collapseDistance =
+        _expandedHeaderHeight - (kToolbarHeight + topPadding);
 
     const extra = 12.0;
     final threshold = (collapseDistance - extra).clamp(0.0, double.infinity);
@@ -78,8 +78,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _snapUpAfterCollapse() async {
     if (!_scrollController.hasClients) return;
 
-    // ✅ Si hay poco contenido y el layout cambia bruscamente, hacemos un snap
-    // suave a una posición segura (cerca del inicio), y recalculamos.
     final target = _scrollController.offset.clamp(0.0, 120.0);
     if ((_scrollController.offset - target).abs() < 0.5) {
       _recomputeCollapsedTitle();
@@ -135,6 +133,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 showCollapsedTitle: _showCollapsedTitle,
               ),
 
+              // Inicio del “sheet” con radio superior.
               SliverToBoxAdapter(
                 child: ClipRRect(
                   borderRadius: const BorderRadius.only(
@@ -148,6 +147,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
 
+              // Header pinned "Sobre mí" con radio cuando está al inicio.
               SliverPersistentHeader(
                 pinned: true,
                 delegate: _PinnedSectionHeaderDelegate(
@@ -157,10 +157,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
 
-              SliverToBoxAdapter(
+              // ✅ Rellenar todo el resto de pantalla con el fondo de “Sobre mí”.
+              SliverFillRemaining(
+                hasScrollBody: false,
                 child: Container(
                   color: _sheetBg,
                   padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+                  alignment: Alignment.topLeft,
                   child: ProfileAboutSection(
                     bio: (bio != null && bio.isNotEmpty) ? bio : null,
                     onCollapseSnapToTop: _snapUpAfterCollapse,
