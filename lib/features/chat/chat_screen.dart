@@ -169,6 +169,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
                         return HeaderRoom(
                           roomName: roomName,
+                          ownerUid: ownerUid,
                           ownerDisplayName: ownerDisplayName,
                           ownerPhotoUrl: ownerPhotoUrl,
                           memberCount: memberCount,
