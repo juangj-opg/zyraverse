@@ -4,9 +4,14 @@ class ProfileAboutSection extends StatefulWidget {
   const ProfileAboutSection({
     super.key,
     required this.bio,
+    required this.onCollapseSnapToTop,
   });
 
   final String? bio;
+
+  /// Cuando se pulsa "Ver menos", forzamos un pequeño "snap" hacia arriba
+  /// para evitar estados raros cuando hay poco contenido.
+  final VoidCallback onCollapseSnapToTop;
 
   @override
   State<ProfileAboutSection> createState() => _ProfileAboutSectionState();
@@ -15,53 +20,56 @@ class ProfileAboutSection extends StatefulWidget {
 class _ProfileAboutSectionState extends State<ProfileAboutSection> {
   bool _expanded = false;
 
+  void _toggle() {
+    final wasExpanded = _expanded;
+    setState(() => _expanded = !_expanded);
+
+    // ✅ Si acabamos de colapsar ("Ver menos"), pedimos snap hacia arriba.
+    if (wasExpanded && !_expanded) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        widget.onCollapseSnapToTop();
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final bio = widget.bio;
+    final bio = widget.bio?.trim();
 
-    // OJO: El título "Sobre mí" ahora va anclado (pinned) en el ProfileScreen
-    // para replicar el comportamiento de ProjectZ.
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: const [
-              Icon(Icons.subject, color: Colors.white70, size: 18),
-              SizedBox(width: 8),
-              Text(
-                'Bio',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          if (bio == null)
-            const Text(
-              'Sin bio',
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: const [
+            Icon(Icons.subject, color: Colors.white70, size: 18),
+            SizedBox(width: 8),
+            Text(
+              'Bio',
               style: TextStyle(
-                color: Colors.white60,
-                fontWeight: FontWeight.w600,
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
               ),
-            )
-          else
-            _BioText(
-              text: bio,
-              expanded: _expanded,
-              onToggle: () => setState(() => _expanded = !_expanded),
             ),
-        ],
-      ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (bio == null || bio.isEmpty)
+          const Text(
+            'Sin bio',
+            style: TextStyle(
+              color: Colors.white60,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+              height: 1.25,
+            ),
+          )
+        else
+          _BioText(
+            text: bio,
+            expanded: _expanded,
+            onToggle: _toggle,
+          ),
+      ],
     );
   }
 }
@@ -78,7 +86,6 @@ class _BioText extends StatelessWidget {
   final VoidCallback onToggle;
 
   bool _shouldShowToggle(String text) {
-    // Heurística simple:
     final lineBreaks = '\n'.allMatches(text).length;
     return lineBreaks >= 5 || text.length > 220;
   }
@@ -98,17 +105,22 @@ class _BioText extends StatelessWidget {
             fontSize: 14,
             height: 1.25,
             fontWeight: FontWeight.w600,
+            color: Colors.white,
           ),
         ),
         if (canToggle) ...[
           const SizedBox(height: 10),
           GestureDetector(
             onTap: onToggle,
-            child: Text(
-              expanded ? 'Ver menos' : 'Ver todo',
-              style: const TextStyle(
-                color: Colors.lightBlueAccent,
-                fontWeight: FontWeight.w700,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                expanded ? 'Ver menos' : 'Ver todo',
+                style: const TextStyle(
+                  color: Colors.lightBlueAccent,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ),

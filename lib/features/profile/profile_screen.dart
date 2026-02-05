@@ -18,12 +18,11 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  static const double _expandedHeaderHeight = 300;
+  static const double _sheetTopRadius = 28;
+  static const Color _sheetBg = Color(0xFF0F0F12);
+
   final ScrollController _scrollController = ScrollController();
-
-  // ✅ La key debe estar en el HEADER "Sobre mí" (el pinned),
-  // no dentro del contenido, porque es lo que queremos “detectar” cuando llega arriba.
-  final GlobalKey _aboutHeaderKey = GlobalKey();
-
   bool _showCollapsedTitle = false;
 
   @override
@@ -31,7 +30,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.initState();
     _scrollController.addListener(_onScroll);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updateCollapsedTitle());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _recomputeCollapsedTitle();
+    });
   }
 
   @override
@@ -41,29 +42,57 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.dispose();
   }
 
-  void _onScroll() => _updateCollapsedTitle();
+  void _onScroll() => _recomputeCollapsedTitle();
 
-  void _updateCollapsedTitle() {
+  void _setCollapsedTitle(bool value) {
+    if (!mounted) return;
+    if (value == _showCollapsedTitle) return;
+    setState(() => _showCollapsedTitle = value);
+  }
+
+  void _recomputeCollapsedTitle() {
     if (!mounted) return;
 
-    final ctx = _aboutHeaderKey.currentContext;
-    if (ctx == null) return;
-
-    final obj = ctx.findRenderObject();
-    if (obj is! RenderBox) return;
-
-    // Posición global del header "Sobre mí"
-    final dy = obj.localToGlobal(Offset.zero).dy;
-
-    // ✅ Umbral correcto en iOS (notch): SafeArea desplaza el contenido,
-    // así que hay que sumar el padding superior real.
-    final topPadding = MediaQuery.of(context).padding.top;
-    final threshold = topPadding + kToolbarHeight + 2;
-
-    final shouldShow = dy <= threshold;
-    if (shouldShow != _showCollapsedTitle) {
-      setState(() => _showCollapsedTitle = shouldShow);
+    if (!_scrollController.hasClients) {
+      _setCollapsedTitle(false);
+      return;
     }
+
+    final offset = _scrollController.offset;
+
+    // ✅ Regla absoluta: si estás arriba del todo (o sobre-scroll), nunca mostramos el colapsado.
+    if (offset <= 1.0) {
+      _setCollapsedTitle(false);
+      return;
+    }
+
+    final topPadding = MediaQuery.of(context).padding.top;
+    final collapseDistance = _expandedHeaderHeight - (kToolbarHeight + topPadding);
+
+    const extra = 12.0;
+    final threshold = (collapseDistance - extra).clamp(0.0, double.infinity);
+
+    _setCollapsedTitle(offset >= threshold);
+  }
+
+  Future<void> _snapUpAfterCollapse() async {
+    if (!_scrollController.hasClients) return;
+
+    // ✅ Si hay poco contenido y el layout cambia bruscamente, hacemos un snap
+    // suave a una posición segura (cerca del inicio), y recalculamos.
+    final target = _scrollController.offset.clamp(0.0, 120.0);
+    if ((_scrollController.offset - target).abs() < 0.5) {
+      _recomputeCollapsedTitle();
+      return;
+    }
+
+    await _scrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+
+    _recomputeCollapsedTitle();
   }
 
   @override
@@ -75,90 +104,72 @@ class _ProfileScreenState extends State<ProfileScreen> {
         FirebaseFirestore.instance.collection('users').doc(widget.profileUid);
 
     return Scaffold(
-      body: SafeArea(
-        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: userRef.snapshots(),
-          builder: (context, snap) {
-            final data = snap.data?.data();
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: userRef.snapshots(),
+        builder: (context, snap) {
+          final data = snap.data?.data();
 
-            final displayName = (data?['displayName'] as String?)?.trim();
-            final username = (data?['username'] as String?)?.trim();
-            final bio = (data?['bio'] as String?)?.trim();
+          final displayName = (data?['displayName'] as String?)?.trim();
+          final username = (data?['username'] as String?)?.trim();
+          final bio = (data?['bio'] as String?)?.trim();
 
-            final shownDisplayName =
-                (displayName != null && displayName.isNotEmpty)
-                    ? displayName
-                    : '---';
-            final shownUsername = (username != null && username.isNotEmpty)
-                ? '@$username'
-                : '@---';
+          final shownDisplayName =
+              (displayName != null && displayName.isNotEmpty)
+                  ? displayName
+                  : '---';
+          final shownUsername = (username != null && username.isNotEmpty)
+              ? '@$username'
+              : '@---';
 
-            // Recalcular tras rebuilds del stream.
-            WidgetsBinding.instance
-                .addPostFrameCallback((_) => _updateCollapsedTitle());
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _recomputeCollapsedTitle();
+          });
 
-            return CustomScrollView(
-              controller: _scrollController,
-              slivers: [
-                ProfileCollapsingHeader(
-                  displayName: shownDisplayName,
-                  username: shownUsername,
-                  isMe: isMe,
-                  showCollapsedTitle: _showCollapsedTitle,
-                ),
+          return CustomScrollView(
+            controller: _scrollController,
+            slivers: [
+              ProfileCollapsingHeader(
+                displayName: shownDisplayName,
+                username: shownUsername,
+                isMe: isMe,
+                showCollapsedTitle: _showCollapsedTitle,
+              ),
 
-                const SliverToBoxAdapter(child: SizedBox(height: 10)),
-
-                // ✅ "Sobre mí" ANCLADO (pinned) estilo ProjectZ
-                SliverPersistentHeader(
-                  pinned: true,
-                  delegate: _PinnedSectionHeaderDelegate(
-                    child: KeyedSubtree(
-                      key: _aboutHeaderKey,
-                      child: const _PinnedSectionHeader(title: 'Sobre mí'),
-                    ),
+              SliverToBoxAdapter(
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(_sheetTopRadius),
+                    topRight: Radius.circular(_sheetTopRadius),
+                  ),
+                  child: Container(
+                    color: _sheetBg,
+                    height: 14,
                   ),
                 ),
+              ),
 
-                // Contenido de "Sobre mí" (Bio card)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
-                    child: ProfileAboutSection(
-                      bio: (bio != null && bio.isNotEmpty) ? bio : null,
-                    ),
+              SliverPersistentHeader(
+                pinned: true,
+                delegate: _PinnedSectionHeaderDelegate(
+                  title: 'Sobre mí',
+                  bg: _sheetBg,
+                  topRadius: _sheetTopRadius,
+                ),
+              ),
+
+              SliverToBoxAdapter(
+                child: Container(
+                  color: _sheetBg,
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+                  child: ProfileAboutSection(
+                    bio: (bio != null && bio.isNotEmpty) ? bio : null,
+                    onCollapseSnapToTop: _snapUpAfterCollapse,
                   ),
                 ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class _PinnedSectionHeader extends StatelessWidget {
-  const _PinnedSectionHeader({
-    required this.title,
-  });
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    // Fondo opaco para que el contenido pase por detrás y se lea perfecto.
-    return Container(
-      height: 48,
-      alignment: Alignment.centerLeft,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      color: Colors.black.withOpacity(0.90),
-      child: Text(
-        title,
-        style: const TextStyle(
-          fontSize: 18,
-          fontWeight: FontWeight.w800,
-        ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -166,16 +177,22 @@ class _PinnedSectionHeader extends StatelessWidget {
 
 class _PinnedSectionHeaderDelegate extends SliverPersistentHeaderDelegate {
   _PinnedSectionHeaderDelegate({
-    required this.child,
+    required this.title,
+    required this.bg,
+    required this.topRadius,
   });
 
-  final Widget child;
+  final String title;
+  final Color bg;
+  final double topRadius;
+
+  static const double _h = 52;
 
   @override
-  double get minExtent => 48;
+  double get minExtent => _h;
 
   @override
-  double get maxExtent => 48;
+  double get maxExtent => _h;
 
   @override
   Widget build(
@@ -183,11 +200,35 @@ class _PinnedSectionHeaderDelegate extends SliverPersistentHeaderDelegate {
     double shrinkOffset,
     bool overlapsContent,
   ) {
-    return child;
+    final radius = overlapsContent
+        ? BorderRadius.zero
+        : BorderRadius.only(
+            topLeft: Radius.circular(topRadius),
+            topRight: Radius.circular(topRadius),
+          );
+
+    return ClipRRect(
+      borderRadius: radius,
+      child: Container(
+        height: _h,
+        color: bg,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        alignment: Alignment.centerLeft,
+        child: Text(
+          title,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ),
+    );
   }
 
   @override
   bool shouldRebuild(covariant _PinnedSectionHeaderDelegate oldDelegate) {
-    return oldDelegate.child != child;
+    return oldDelegate.title != title ||
+        oldDelegate.bg != bg ||
+        oldDelegate.topRadius != topRadius;
   }
 }
