@@ -133,20 +133,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 showCollapsedTitle: _showCollapsedTitle,
               ),
 
-              // Inicio del “sheet” con radio superior.
-              SliverToBoxAdapter(
-                child: ClipRRect(
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(_sheetTopRadius),
-                    topRight: Radius.circular(_sheetTopRadius),
-                  ),
-                  child: Container(
-                    color: _sheetBg,
-                    height: 14,
-                  ),
-                ),
-              ),
-
               // Header pinned "Sobre mí" con radio cuando está al inicio.
               SliverPersistentHeader(
                 pinned: true,
@@ -162,7 +148,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 hasScrollBody: false,
                 child: Container(
                   color: _sheetBg,
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
                   alignment: Alignment.topLeft,
                   child: ProfileAboutSection(
                     bio: (bio != null && bio.isNotEmpty) ? bio : null,
@@ -215,7 +201,7 @@ class _PinnedSectionHeaderDelegate extends SliverPersistentHeaderDelegate {
       child: Container(
         height: _h,
         color: bg,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 24),
         alignment: Alignment.centerLeft,
         child: Text(
           title,
