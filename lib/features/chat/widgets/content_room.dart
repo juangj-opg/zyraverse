@@ -72,19 +72,32 @@ class ContentRoom extends StatelessWidget {
         for (int i = 0; i < messages.length; i++) {
           final m = messages[i];
 
-          if (_needsSeparator(m.createdAt, prevTime)) {
+          // IMPORTANTE (estilo ProjectZ):
+          // Los separadores (fecha/hora) y los mensajes de sistema deben "romper" el grupo.
+          // Es decir: si insertamos un separador aquí, el siguiente mensaje del mismo autor
+          // debe volver a mostrar avatar+nombre como inicio de bloque.
+          final insertedSeparator = _needsSeparator(m.createdAt, prevTime);
+
+          if (insertedSeparator) {
             items.add(_ChatItem.separator(_formatDateSeparator(m.createdAt)));
           }
 
           final prevMsg = (i > 0) ? messages[i - 1] : null;
           final nextMsg = (i < messages.length - 1) ? messages[i + 1] : null;
 
-          final sameAsPrev = prevMsg != null &&
+          // Si hay separador insertado antes de este mensaje, NO puede ser continuación del grupo.
+          final sameAsPrev = !insertedSeparator &&
+              prevMsg != null &&
               prevMsg.type == 'user' &&
               m.type == 'user' &&
               prevMsg.authorId == m.authorId;
 
-          final sameAsNext = nextMsg != null &&
+          // Si entre este mensaje y el siguiente habrá un separador, entonces ESTE es el último del grupo.
+          final separatorBeforeNext =
+              nextMsg != null ? _needsSeparator(nextMsg.createdAt, m.createdAt) : false;
+
+          final sameAsNext = !separatorBeforeNext &&
+              nextMsg != null &&
               nextMsg.type == 'user' &&
               m.type == 'user' &&
               nextMsg.authorId == m.authorId;
