@@ -159,6 +159,7 @@ class ContentRoom extends StatelessWidget {
               isMe: isMe,
               displayName: name,
               text: msg.text,
+              authorUid: msg.authorId,
               showHeader: item.isFirstOfGroup!,
               showAvatar: item.isFirstOfGroup!,
               addBottomGap: item.isLastOfGroup!,

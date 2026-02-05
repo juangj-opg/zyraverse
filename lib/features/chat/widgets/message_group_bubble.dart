@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../../profile/profile_screen.dart';
+
 class MessageGroupBubble extends StatelessWidget {
   final bool isMe;
   final String displayName;
   final String text;
+
+  // ✅ Necesario para navegar al perfil correcto
+  final String authorUid;
 
   final bool showHeader;
   final bool showAvatar;
@@ -14,6 +19,7 @@ class MessageGroupBubble extends StatelessWidget {
     required this.isMe,
     required this.displayName,
     required this.text,
+    required this.authorUid,
     required this.showHeader,
     required this.showAvatar,
     required this.addBottomGap,
@@ -26,6 +32,25 @@ class MessageGroupBubble extends StatelessWidget {
     final align = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final rowAlign = isMe ? MainAxisAlignment.end : MainAxisAlignment.start;
 
+    void openProfile() {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ProfileScreen(profileUid: authorUid),
+        ),
+      );
+    }
+
+    Widget buildAvatar() {
+      return InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: openProfile,
+        child: const CircleAvatar(
+          backgroundColor: Colors.white10,
+          child: Icon(Icons.person, color: Colors.white70),
+        ),
+      );
+    }
+
     return Padding(
       padding: EdgeInsets.only(bottom: addBottomGap ? 14 : 6),
       child: Row(
@@ -33,10 +58,7 @@ class MessageGroupBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isMe && showAvatar) ...[
-            const CircleAvatar(
-              backgroundColor: Colors.white10,
-              child: Icon(Icons.person, color: Colors.white70),
-            ),
+            buildAvatar(),
             const SizedBox(width: 10),
           ] else if (!isMe) ...[
             const SizedBox(width: 40),
@@ -58,7 +80,8 @@ class MessageGroupBubble extends StatelessWidget {
                     ),
                   ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   decoration: BoxDecoration(
                     color: bubbleColor,
                     borderRadius: BorderRadius.circular(14),
@@ -70,10 +93,7 @@ class MessageGroupBubble extends StatelessWidget {
           ),
           if (isMe && showAvatar) ...[
             const SizedBox(width: 10),
-            const CircleAvatar(
-              backgroundColor: Colors.white10,
-              child: Icon(Icons.person, color: Colors.white70),
-            ),
+            buildAvatar(),
           ] else if (isMe) ...[
             const SizedBox(width: 10),
             const SizedBox(width: 40),
