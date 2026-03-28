@@ -3,9 +3,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/services/rooms_service.dart';
-import '../rooms/room_list_screen.dart';
 import 'discover_screen.dart';
 import '../profile/profile_screen.dart';
+import '../rooms/create_room_screen.dart';
+import '../rooms/room_list_screen.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -15,14 +16,12 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  int _index = 0;
   final _roomsService = RoomsService();
 
   @override
   void initState() {
     super.initState();
 
-    // Seed de salas por defecto (prototipo). Si ya existen, no hace nada.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) return;
@@ -30,7 +29,7 @@ class _HomeShellState extends State<HomeShell> {
       try {
         await _roomsService.ensureDefaultRooms(seededByUid: uid);
       } catch (_) {
-        // Si reglas no lo permiten o no hay conexión, no bloqueamos la UI.
+        // No bloqueamos UI si reglas / red / etc.
       }
     });
   }
@@ -39,23 +38,26 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid;
 
-    final tabs = <Widget>[
-      const DiscoverScreen(),
-      const RoomListScreen(embedded: true),
-    ];
-
     return Scaffold(
       body: SafeArea(
         child: Column(
           children: [
             _HomeHeader(uid: uid),
-            Expanded(child: tabs[_index]),
+            const Expanded(child: DiscoverScreen()),
           ],
         ),
       ),
-      bottomNavigationBar: _BottomBar(
-        index: _index,
-        onChanged: (i) => setState(() => _index = i),
+      bottomNavigationBar: _HomeBottomBar(
+        onCreateTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const CreateRoomScreen()),
+          );
+        },
+        onChatsTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const RoomListScreen()),
+          );
+        },
       ),
     );
   }
@@ -91,7 +93,6 @@ class _HomeHeader extends StatelessWidget {
             children: [
               GestureDetector(
                 onTap: () {
-                  // Perfil (placeholder: sin edición todavía)
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => ProfileScreen(profileUid: uid!),
@@ -132,7 +133,6 @@ class _HomeHeader extends StatelessWidget {
               ),
               IconButton(
                 onPressed: () {
-                  // placeholder búsqueda
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Búsqueda: pendiente')),
                   );
@@ -141,7 +141,6 @@ class _HomeHeader extends StatelessWidget {
               ),
               IconButton(
                 onPressed: () {
-                  // placeholder notificaciones
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Notificaciones: pendiente')),
                   );
@@ -156,35 +155,113 @@ class _HomeHeader extends StatelessWidget {
   }
 }
 
-class _BottomBar extends StatelessWidget {
-  final int index;
-  final ValueChanged<int> onChanged;
+class _HomeBottomBar extends StatelessWidget {
+  final VoidCallback onCreateTap;
+  final VoidCallback onChatsTap;
 
-  const _BottomBar({
-    required this.index,
-    required this.onChanged,
+  const _HomeBottomBar({
+    required this.onCreateTap,
+    required this.onChatsTap,
+  });
+
+  static const double _visualHeight = 78;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        height: _visualHeight,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+        decoration: const BoxDecoration(
+          color: Colors.black,
+          border: Border(
+            top: BorderSide(color: Colors.white10, width: 1),
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: _BottomItem(
+                icon: Icons.explore_outlined,
+                label: 'Descubre',
+                selected: true,
+                onTap: () {
+                  // Estamos en Home/Discover.
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 50,
+              height: 50,
+              child: Material(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(999),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(999),
+                  onTap: onCreateTap,
+                  child: const Icon(Icons.add, color: Colors.white, size: 30),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _BottomItem(
+                icon: Icons.chat_bubble_outline,
+                label: 'Chats',
+                selected: false,
+                onTap: onChatsTap,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _BottomItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return BottomNavigationBar(
-      currentIndex: index,
-      onTap: onChanged,
-      type: BottomNavigationBarType.fixed,
-      selectedItemColor: Colors.white,
-      unselectedItemColor: Colors.white60,
-      items: const [
-        BottomNavigationBarItem(
-          icon: Icon(Icons.explore_outlined),
-          activeIcon: Icon(Icons.explore),
-          label: 'Descubre',
+    final color = selected ? Colors.white : Colors.white60;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
         ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.chat_bubble_outline),
-          activeIcon: Icon(Icons.chat_bubble),
-          label: 'Chats',
-        ),
-      ],
+      ),
     );
   }
 }

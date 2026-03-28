@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/services/rooms_service.dart';
 import '../chat/chat_screen.dart';
+import '../rooms/room_list_screen.dart';
 import '../rooms/room_model.dart';
 
 class DiscoverScreen extends StatelessWidget {
@@ -77,20 +78,32 @@ class DiscoverScreen extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Título sección (estilo ProjectZ)
-              Row(
-                children: const [
-                  Expanded(
-                    child: Text(
-                      'Chats activos',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white70,
+              InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  // Acceso a "Mis chats" (listado de salas a las que pertenezco)
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const RoomListScreen()),
+                  );
+                },
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Chats activos',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white70,
+                          ),
+                        ),
                       ),
-                    ),
+                      Icon(Icons.chevron_right, color: Colors.white54),
+                    ],
                   ),
-                  Icon(Icons.chevron_right, color: Colors.white54),
-                ],
+                ),
               ),
               const SizedBox(height: 12),
 

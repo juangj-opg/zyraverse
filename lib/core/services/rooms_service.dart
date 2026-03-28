@@ -47,6 +47,56 @@ class RoomsService {
     }, SetOptions(merge: true));
   }
 
+  /// Crear una sala nueva.
+  ///
+  /// MVP 0.0.x:
+  /// - Se crea el documento `rooms/{roomId}` con metadata mínima.
+  /// - Se crea `rooms/{roomId}/members/{uid}` con role=owner.
+  /// - Se rellena `memberIds` y `memberCount` para compatibilidad con el listado "Mis chats".
+  ///
+  /// Nota: la imagen se reserva a futuro (Storage), por ahora siempre placeholder.
+  Future<String> createRoom({
+    required String uid,
+    required String ownerDisplayName,
+    required String name,
+    required String description,
+    required String type, // 'public' | 'private'
+  }) async {
+    final roomDoc = _rooms.doc();
+    final roomId = roomDoc.id;
+
+    final batch = _db.batch();
+
+    final now = FieldValue.serverTimestamp();
+    batch.set(roomDoc, {
+      'name': name,
+      'description': description,
+      'type': type,
+      'ownerUid': uid,
+      'ownerDisplayName': ownerDisplayName,
+      'createdAt': now,
+      'updatedAt': now,
+      'lastMessageText': null,
+      'lastMessageAt': null,
+      'lastActivityAt': now,
+      'memberCount': 1,
+      'memberIds': <String>[uid],
+      // sortAt se mantiene para compatibilidad con datos previos (si existiese ordenación).
+      'sortAt': 0,
+    });
+
+    final mRef = memberRef(roomId, uid);
+    batch.set(mRef, {
+      'uid': uid,
+      'role': 'owner',
+      'displayName': ownerDisplayName,
+      'joinedAt': now,
+    });
+
+    await batch.commit();
+    return roomId;
+  }
+
   /// Unirse (idempotente) en 2 pasos.
   ///
   /// IMPORTANTE:
