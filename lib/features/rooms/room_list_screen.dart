@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/services/rooms_service.dart';
 import '../chat/chat_screen.dart';
+import 'create_room_screen.dart';
 import 'room_model.dart';
 
 class RoomListScreen extends StatelessWidget {
@@ -251,6 +252,103 @@ class RoomListScreen extends StatelessWidget {
 
     if (embedded) return SafeArea(child: body);
 
-    return Scaffold(body: SafeArea(child: body));
+    return Scaffold(
+      body: SafeArea(child: body),
+      bottomNavigationBar: _buildBottomBar(context),
+    );
+  }
+
+  Widget _buildBottomBar(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        height: 78,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+        decoration: const BoxDecoration(
+          color: Colors.black,
+          border: Border(
+            top: BorderSide(color: Colors.white10, width: 1),
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: _buildBottomItem(
+                icon: Icons.explore_outlined,
+                label: 'Descubre',
+                selected: false,
+                onTap: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 50,
+              height: 50,
+              child: Material(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(999),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(999),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const CreateRoomScreen()),
+                    );
+                  },
+                  child: const Icon(Icons.add, color: Colors.white, size: 30),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _buildBottomItem(
+                icon: Icons.chat_bubble_outline,
+                label: 'Chats',
+                selected: true,
+                onTap: () {
+                  // Ya estamos en Chats
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomItem({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final color = selected ? Colors.white : Colors.white60;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
